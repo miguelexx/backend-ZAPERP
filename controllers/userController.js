@@ -1,4 +1,5 @@
 const supabase = require('../config/supabase')
+const { invalidateColaboradoresEncaminharCache } = require('../helpers/colaboradoresEncaminharHelper')
 const jwt = require('jsonwebtoken')
 const bcrypt = require('bcryptjs')
 const crmSync = require('../services/crmSyncService')
@@ -239,6 +240,7 @@ exports.criar = async (req, res) => {
         depIds.map((depId) => ({ usuario_id: data.id, departamento_id: Number(depId), company_id }))
       )
     }
+    invalidateColaboradoresEncaminharCache(company_id)
     return res.status(201).json({ ...data, departamento_ids: depIds })
   } catch (err) {
     console.error(err)
@@ -287,6 +289,7 @@ exports.atualizar = async (req, res) => {
       return res.status(500).json({ error: 'Erro interno' })
     }
     if (!data) return res.status(404).json({ error: 'Usuário não encontrado' })
+    invalidateColaboradoresEncaminharCache(company_id)
     if (depIds !== undefined) {
       await supabase.from('usuario_departamentos').delete().eq('usuario_id', id).eq('company_id', company_id)
       if (depIds.length > 0) {
@@ -382,6 +385,7 @@ exports.excluir = async (req, res) => {
       .eq('id', id)
       .eq('company_id', company_id)
     if (error) { console.error('[userController]', error?.message); return res.status(500).json({ error: 'Erro interno' }) }
+    invalidateColaboradoresEncaminharCache(company_id)
     return res.json({ ok: true })
   } catch (err) {
     console.error(err)

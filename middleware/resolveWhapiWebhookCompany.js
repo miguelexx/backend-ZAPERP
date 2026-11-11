@@ -9,6 +9,7 @@
  */
 
 const { getWhatsappInstanceByProviderInstanceId } = require('../services/whatsappInstanceService')
+const { whatsappDebugAtivo } = require('../helpers/whatsappDebug')
 
 const PROVIDER = 'whapi'
 
@@ -125,7 +126,8 @@ async function resolveWhapiWebhookCompany(req, res, next) {
     }
     req.zapiContext = req.webhookContext
 
-    _logSafe({ channelId: channelIdRaw.slice(0, 32), companyIdResolved: company_id })
+    // Resolve OK só com WHATSAPP_DEBUG (doc 29 §3 item 15): era uma linha por webhook Whapi.
+    if (whatsappDebugAtivo()) _logSafe({ channelId: channelIdRaw.slice(0, 32), companyIdResolved: company_id })
     next()
   } catch (e) {
     console.error('[resolveWhapiWebhookCompany]', e?.message || e)

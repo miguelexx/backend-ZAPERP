@@ -14,6 +14,7 @@ const supabase = require('../config/supabase')
 const { pickConversationDisplayName } = require('../helpers/contactEnrichment')
 const { isGroupConversation } = require('../helpers/conversaHelper')
 const { empresaModoSimplesAtivo } = require('../helpers/empresaModoSimplesFlag')
+const { listUltimaMensagemPorConversa } = require('./chat/read/ultimaMensagemPorConversa')
 const {
   loadChatbotTriageMergeAndAbsence,
   outboundQualificaParaAguardandoCliente,
@@ -316,52 +317,15 @@ async function listOpenConversations(companyId) {
 }
 
 /**
- * Última mensagem in/out por conversa. Pagina para não truncar em ~1000 linhas globais.
+ * Última mensagem in/out por conversa — embed lateral `limit 1` por conversa, sem OFFSET
+ * (doc 29 §3 item 10; implementação partilhada com Minhas Pendências em
+ * `services/chat/read/ultimaMensagemPorConversa.js`).
  * Chaves do Map são sempre Number(conversa_id) para bater com conversa.id do Postgres/JS.
  */
 async function listLastMessagesByConversation(companyId, conversationIds) {
-  const normalizeIds = [...new Set((conversationIds || []).map((id) => Number(id)).filter((n) => Number.isFinite(n) && n > 0))]
-  if (!normalizeIds.length) return new Map()
-
-  async function fetchSlice(idsSlice) {
-    const needed = new Set(idsSlice)
-    const map = new Map()
-    let offset = 0
-    for (;;) {
-      const { data, error } = await supabase
-        .from('mensagens')
-        .select('conversa_id, direcao, texto, tipo, criado_em')
-        .eq('company_id', companyId)
-        .in('conversa_id', idsSlice)
-        .in('direcao', ['in', 'out'])
-        .not('criado_em', 'is', null)
-        .order('criado_em', { ascending: false, nullsFirst: false })
-        .range(offset, offset + MSG_STATS_PAGE - 1)
-      if (error) throw error
-      const rows = data || []
-      for (const msg of rows) {
-        const cid = Number(msg.conversa_id)
-        if (!needed.has(cid)) continue
-        if (!map.has(cid)) map.set(cid, msg)
-      }
-      if (rows.length < MSG_STATS_PAGE) break
-      offset += MSG_STATS_PAGE
-      if (map.size >= needed.size) break
-    }
-    return map
-  }
-
-  if (normalizeIds.length <= CONV_ID_IN_CHUNK) return fetchSlice(normalizeIds)
-
-  const merged = new Map()
-  for (let i = 0; i < normalizeIds.length; i += CONV_ID_IN_CHUNK) {
-    const slice = normalizeIds.slice(i, i + CONV_ID_IN_CHUNK)
-    const part = await fetchSlice(slice)
-    for (const [k, v] of part) {
-      if (!merged.has(k)) merged.set(k, v)
-    }
-  }
-  return merged
+  return listUltimaMensagemPorConversa(companyId, conversationIds, {
+    colunas: 'conversa_id, direcao, texto, tipo, criado_em',
+  })
 }
 
 function hasValidResumoIA(conversa) {

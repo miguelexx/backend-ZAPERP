@@ -16,6 +16,11 @@ const { instanciasPermitidasDoUsuario } = require('./chat/access/usuarioWhatsapp
 const { aplicarFiltroNumerosPermitidos } = require('./chat/access/usuarioWhatsappInstanceAccessRules')
 const { usuarioPertenceSetorFinanceiro } = require('../helpers/financeiroSetorHelper')
 const {
+  temMensagemDisponivel,
+  erroDeTemMensagemAusente,
+  desligarTemMensagem,
+} = require('../helpers/conversasTemMensagemColumn')
+const {
   buildTelefoneSearchOr,
   buildPhoneSearchTerms,
   escapeIlikePattern,
@@ -650,7 +655,96 @@ function countNeedsPostListRules(overrides = {}, ctx = {}) {
   )
 }
 
+/**
+ * Predicado SQL (sintaxe `or=` do PostgREST) EQUIVALENTE a `rowVisibleInPostFilteredList` para
+ * os três overrides que exigem regra pós-lista. Só é possível porque `conversas.tem_mensagem`
+ * (migration 20261111135500) traz para a própria tabela o único dado que antes vinha do embed
+ * `mensagens(id)`. Mantenha as duas funções espelhadas: a JS continua sendo a regra de
+ * referência (e o fallback enquanto a coluna não existe).
+ *
+ * Diferenças assumidas em relação à JS (iguais às que `applyChatListSqlFilters` já assume):
+ * `tipo.eq.grupo` e `status_atendimento.eq.x` são comparações exatas — a JS normaliza com
+ * trim/lowercase, mas o código grava esses valores sempre em minúsculas.
+ *
+ * @returns {string|null} string para `.or(...)`, ou null se o override não tem regra pós-lista.
+ */
+function buildPostListRulesSqlOr(ctx, overrides = {}) {
+  const NUNCA = 'id.in.(0)' // predicado falso (mesmo idioma de `q.in('id', [0])`)
+  const NAO_GRUPO = 'or(tipo.is.null,tipo.neq.grupo)'
+  const SEM_CAMPANHA = 'aguardando_resposta_campanha.not.is.true'
+  const TEM_MOVIMENTO = 'or(tem_mensagem.eq.true,atendente_id.not.is.null)'
+
+  const userId =
+    ctx?.user_id != null && Number.isFinite(Number(ctx.user_id)) ? Number(ctx.user_id) : null
+  const participantes = (ctx?.conversaIdsParticipanteAtivo || [])
+    .map(Number)
+    .filter((n) => Number.isFinite(n) && n > 0)
+  const vinculadaParts = []
+  if (userId != null) vinculadaParts.push(`atendente_id.eq.${userId}`)
+  if (participantes.length > 0) vinculadaParts.push(`id.in.(${participantes.join(',')})`)
+  const vinculadaAoUsuario =
+    vinculadaParts.length === 0
+      ? NUNCA
+      : vinculadaParts.length === 1
+        ? vinculadaParts[0]
+        : `or(${vinculadaParts.join(',')})`
+
+  if (overrides.minha_fila === true) {
+    const parts = []
+    const fixados = (ctx?.grupoIdsFixadosNaMinhaFila || [])
+      .map(Number)
+      .filter((n) => Number.isFinite(n) && n > 0)
+    if (fixados.length > 0) parts.push(`and(tipo.eq.grupo,id.in.(${fixados.join(',')}))`)
+    parts.push(
+      `and(${NAO_GRUPO},${SEM_CAMPANHA},status_atendimento.in.(em_atendimento,aguardando_cliente,pagamento_pendente,em_atraso),${vinculadaAoUsuario})`
+    )
+    const livreOuMeu =
+      userId != null ? `or(atendente_id.is.null,atendente_id.eq.${userId})` : 'atendente_id.is.null'
+    parts.push(
+      `and(${NAO_GRUPO},${SEM_CAMPANHA},status_atendimento.eq.aberta,${livreOuMeu},${TEM_MOVIMENTO})`
+    )
+    return parts.join(',')
+  }
+
+  if (overrides.status_atendimento === 'aberta') {
+    return `tipo.eq.grupo,and(${NAO_GRUPO},${SEM_CAMPANHA},status_atendimento.eq.aberta,${TEM_MOVIMENTO})`
+  }
+
+  if (overrides.status_atendimento === 'em_atendimento' && !overrides.aguardando_cliente) {
+    if (ctx?.isAtendente) {
+      return `and(${NAO_GRUPO},status_atendimento.eq.em_atendimento,${vinculadaAoUsuario})`
+    }
+    const filtroAtendente =
+      ctx?.filtroAtendenteInformado != null ? Number(ctx.filtroAtendenteInformado) : null
+    const porAtendente = filtroAtendente != null ? `atendente_id.eq.${filtroAtendente},` : ''
+    return `and(${NAO_GRUPO},${porAtendente}status_atendimento.in.(em_atendimento,aguardando_cliente))`
+  }
+
+  return null
+}
+
+/**
+ * Contador das abas com regra pós-lista. Com `conversas.tem_mensagem` no banco é um
+ * `count(*)` exato, sem embed e sem teto; sem a coluna (42703 na 1ª tentativa, lembrado por
+ * processo) cai na varredura antiga, idêntica à de antes da coluna existir.
+ */
 async function countConversasWithPostListRules(ctx, overrides = {}) {
+  if (temMensagemDisponivel()) {
+    const predicado = buildPostListRulesSqlOr(ctx, overrides)
+    if (predicado) {
+      let q = supabase.from('conversas').select('id', { count: 'exact', head: true })
+      q = applyChatListSqlFilters(q, ctx, overrides).or(predicado)
+      const { count, error } = await q
+      if (!error) return Number(count) || 0
+      if (!erroDeTemMensagemAusente(error)) throw error
+      desligarTemMensagem()
+    }
+  }
+  return countConversasWithPostListRulesVarrendo(ctx, overrides)
+}
+
+/** Caminho antigo: varre até CHAT_FILTER_ID_LIMIT linhas com embed `mensagens(id)` e PARA no teto. */
+async function countConversasWithPostListRulesVarrendo(ctx, overrides = {}) {
   const pageSize = Math.min(getChatFilterIdLimit(), 1000)
   const maxRows = getChatFilterIdLimit()
   let total = 0
@@ -796,13 +890,36 @@ function withTimeout(promise, timeoutMs) {
   })
 }
 /**
- * Cache em memória para contadores de filtro.
- * Chave: `company_id:user_id:filtros_hash` — TTL curto (10 s).
- * Evita 14 queries paralelas a cada troca de aba quando os filtros base não mudaram.
+ * Cache em memória para contadores de filtro (GET /chats/counts).
+ * Chave: `company_id:user_id:filtros` — o `company_id` vem SEMPRE em primeiro: o isolamento
+ * entre empresas aqui é app-layer (SERVICE_ROLE bypassa RLS) e `invalidateCountsCache` apaga
+ * por prefixo `${company_id}:`.
+ *
+ * Cada entrada é `{ ts, data }` (resolvida) ou `{ promise }` (em voo). A promessa em voo faz
+ * COALESCING — mesmo padrão de `services/supervisaoService.js` e `helpers/shortTtlCache.js`:
+ * N chamadas concorrentes com a mesma chave (duas abas do mesmo usuário, ou flushes de
+ * reconciliação de abas diferentes no mesmo segundo) partilham UMA execução das ~14 counts.
+ * Falha NÃO é cacheada: a entrada em voo sai do mapa no catch.
+ *
+ * TTL: `CHAT_COUNTS_CACHE_TTL_MS` (default 20 s; era 10 s fixo até 10/11/2026 — doc 41 §7).
+ * Quem invalida (`invalidateCountsCache`), conferido em 10/11/2026: SÓ
+ * `controllers/chat/usuarioWhatsappInstanceAccessController` (admin muda quem vê cada
+ * número). Assumir/transferir/encerrar/finalização automática NÃO invalidam este cache —
+ * o frontend cobre o intervalo com delta otimista local nos chips (`chatList.jsx`,
+ * `optimisticRemovedMinhaFila`) e refaz o GET no próximo flush de reconciliação. Logo o
+ * TTL maior só alarga a janela em que um chip pode ficar defasado para QUEM NÃO fez a ação;
+ * quem fez vê o delta na hora.
  */
 const _countsCache = new Map()
-const _COUNTS_CACHE_TTL = 10_000
+const _COUNTS_CACHE_TTL_DEFAULT_MS = 20_000
 const _COUNTS_CACHE_MAX = 200
+
+/** TTL do cache de counts (ms) — lido a cada chamada, como `getChatCountsTimeoutMs`. */
+function getChatCountsCacheTtlMs() {
+  const raw = Number(process.env.CHAT_COUNTS_CACHE_TTL_MS)
+  if (!Number.isFinite(raw) || raw <= 0) return _COUNTS_CACHE_TTL_DEFAULT_MS
+  return Math.min(Math.max(Math.floor(raw), 1000), 300_000)
+}
 
 function buildCountsCacheKey(req) {
   const q = req.query || {}
@@ -821,14 +938,16 @@ function buildCountsCacheKey(req) {
   return parts.join(':')
 }
 
+/** Devolve `{ data }` (válido), `{ promise }` (em voo) ou null (ausente/vencido). */
 function getCachedCounts(key) {
   const entry = _countsCache.get(key)
   if (!entry) return null
-  if (Date.now() - entry.ts > _COUNTS_CACHE_TTL) {
+  if (entry.promise) return entry
+  if (Date.now() - entry.ts > getChatCountsCacheTtlMs()) {
     _countsCache.delete(key)
     return null
   }
-  return entry.data
+  return entry
 }
 
 function setCachedCounts(key, data) {
@@ -854,10 +973,28 @@ function invalidateCountsCache(company_id) {
 async function getChatFilterCounts(req) {
   const cacheKey = buildCountsCacheKey(req)
   const cached = getCachedCounts(cacheKey)
-  if (cached) return cached
+  if (cached) return cached.promise || cached.data
 
+  const promise = computeChatFilterCounts(req)
+  _countsCache.set(cacheKey, { promise })
+  try {
+    const result = await promise
+    // Só recacheia se a entrada em voo ainda é a NOSSA: uma invalidação no meio (visibilidade
+    // por número, assumir/encerrar) não pode ser desfeita por um resultado que começou antes dela.
+    if (_countsCache.get(cacheKey)?.promise === promise) setCachedCounts(cacheKey, result)
+    return result
+  } catch (err) {
+    // Falha (timeout, erro do banco) não é cacheada — só apaga se ainda for a NOSSA entrada
+    // em voo (uma invalidação no meio pode já ter trocado a entrada).
+    if (_countsCache.get(cacheKey)?.promise === promise) _countsCache.delete(cacheKey)
+    throw err
+  }
+}
+
+/** Executa as ~14 counts de verdade (sem cache). Chamado uma vez por chave por TTL. */
+async function computeChatFilterCounts(req) {
   const timeoutMs = getChatCountsTimeoutMs()
-  const result = await withTimeout((async () => {
+  return withTimeout((async () => {
     const ctx = await resolveChatListCountsContext(req)
     const counts = await Promise.all([
       countConversasWithFilter(ctx, {}),
@@ -907,8 +1044,6 @@ async function getChatFilterCounts(req) {
       atraso: counts[10],
     }
   })(), timeoutMs)
-  setCachedCounts(cacheKey, result)
-  return result
 }
 
 module.exports = {
@@ -920,8 +1055,10 @@ module.exports = {
   parseConversaIdsQuery,
   getChatFilterCounts,
   getChatCountsTimeoutMs,
+  getChatCountsCacheTtlMs,
   invalidateCountsCache,
   withTimeout,
   getStartOfTodayIso,
   getEndOfTodayIso,
+  _test: { buildPostListRulesSqlOr },
 }

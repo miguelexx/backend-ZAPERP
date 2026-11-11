@@ -25,7 +25,12 @@ describe('enderecoWhatsappService — JID real antes de agir', () => {
       ]),
     }
     const r = await resolverEnderecoWhatsapp(provider, '5534999911246', { companyId: 4, whatsappInstanceId: 4 })
-    expect(r).toEqual({ original: '5534999911246', jid: '553499911246', chatId: '553499911246@s.whatsapp.net', existe: true, verificado: true })
+    expect(r).toMatchObject({
+      original: '5534999911246', jid: '553499911246',
+      chatId: '553499911246@s.whatsapp.net', existe: true, verificado: true,
+    })
+    // Verificado: um endereço só, não há o que tentar.
+    expect(r.candidatos).toEqual(['553499911246@s.whatsapp.net'])
     expect(provider.checkPhones).toHaveBeenCalledWith(['5534999911246'], { companyId: 4, whatsappInstanceId: 4 })
   })
 
@@ -39,12 +44,16 @@ describe('enderecoWhatsappService — JID real antes de agir', () => {
   test('consulta indisponível NÃO vira "não existe" — segue com o número original', async () => {
     const provider = { checkPhones: jest.fn(async () => { throw new Error('canal fora do ar') }) }
     const r = await resolverEnderecoWhatsapp(provider, '5534999911246', {})
-    expect(r).toEqual({ original: '5534999911246', jid: '5534999911246', chatId: '', existe: true, verificado: false })
+    expect(r).toMatchObject({ original: '5534999911246', jid: '5534999911246', chatId: '', existe: true, verificado: false })
+    // Sem verificação: tenta as duas formas do 9º dígito, sempre como JID completo.
+    expect(r.candidatos).toEqual(['5534999911246@s.whatsapp.net', '553499911246@s.whatsapp.net'])
   })
 
   test('provider sem checkPhones: comportamento antigo, uma chamada a menos', async () => {
     const r = await resolverEnderecoWhatsapp({}, '5534999911246', {})
-    expect(r).toEqual({ original: '5534999911246', jid: '5534999911246', chatId: '', existe: true, verificado: false })
+    expect(r).toMatchObject({ original: '5534999911246', jid: '5534999911246', chatId: '', existe: true, verificado: false })
+    // Sem verificação: tenta as duas formas do 9º dígito, sempre como JID completo.
+    expect(r.candidatos).toEqual(['5534999911246@s.whatsapp.net', '553499911246@s.whatsapp.net'])
   })
 
   test('vários números numa consulta só, deduplicados e na ordem', async () => {
@@ -158,7 +167,8 @@ describe('worker da fila — adiciona no endereço certo', () => {
     checkPhones.mockImplementation(async () => { throw new Error('timeout') })
     await worker.processarItem(item)
 
-    expect(addGroupParticipant.mock.calls[0][1]).toEqual(['5534999911246'])
+    // Sem checkPhones vai o 1º candidato — JID completo, que o adapter não reescreve.
+    expect(addGroupParticipant.mock.calls[0][1]).toEqual(['5534999911246@s.whatsapp.net'])
     expect(finalizacao()).toMatchObject({ resultado: 'processed' })
   })
 })
@@ -253,5 +263,66 @@ describe('endereço enviado — o adapter reinsere o 9º dígito em número cru'
     const r = await resolverEnderecoWhatsapp(provider, '5534999999999', {})
     expect(r.existe).toBe(false)
     expect(r.chatId).toBe('')
+  })
+})
+
+describe('worker não mexe na fila com o número desconectado', () => {
+  let worker
+  let addGroupParticipant
+  let updates
+
+  function montar(statusInstancia) {
+    jest.resetModules()
+    updates = []
+    addGroupParticipant = jest.fn(async () => ({ ok: true, data: { processed: ['x'], failed: [] } }))
+    const chain = {}
+    const ret = () => chain
+    chain.from = ret; chain.select = ret; chain.eq = ret
+    chain.update = (p) => { updates.push(p); return chain }
+    chain.gte = () => Promise.resolve({ count: 0 })
+    chain.in = () => Promise.resolve({ data: [], error: null })
+    chain.maybeSingle = () => Promise.resolve({ data: { id: 'op1', status: 'em_execucao' }, error: null })
+    chain.single = () => Promise.resolve({ data: {}, error: null })
+    chain.rpc = jest.fn(async () => ({ data: true, error: null }))
+    jest.doMock('../config/supabase', () => chain)
+    jest.doMock('../services/providers', () => ({
+      getProvider: () => ({ addGroupParticipant, checkPhones: jest.fn(async () => []) }),
+    }))
+    jest.doMock('../services/whatsappInstanceService', () => ({
+      getWhatsappInstanceById: jest.fn(async () => ({ instance: { metadata: {}, status: statusInstancia }, error: null })),
+    }))
+    jest.doMock('../services/comunidade/comunidadeFilaService', () => ({
+      recalcularContadores: jest.fn(async () => ({})), pausarOperacaoAutomatica: jest.fn(async () => ({})),
+    }))
+    jest.doMock('../services/comunidade/comunidadeSocketService', () => ({ emitComunidade: jest.fn(), EVENTS: {} }))
+    worker = require('../workers/comunidadeWorker')
+  }
+
+  const item = {
+    id: 1, operacao_id: 'op1', company_id: 4, whatsapp_instance_id: 4,
+    comunidade_id: '120363414979314769@g.us', operacao: 'add', tipo: 'grupo',
+    participante_jid: '5534999911246', tentativas: 0, max_tentativas: 5,
+  }
+
+  afterEach(() => jest.resetModules())
+
+  test('status QR: não chama o provedor e não gasta tentativa', async () => {
+    montar('QR')
+    await worker.processarItem(item)
+    expect(addGroupParticipant).not.toHaveBeenCalled()
+    // Nenhuma finalização: o item foi apenas adiado, continua na fila.
+    expect(updates.some((u) => u && u.resultado === 'failed')).toBe(false)
+  })
+
+  test('status connected: processa normalmente', async () => {
+    montar('connected')
+    await worker.processarItem(item)
+    expect(addGroupParticipant).toHaveBeenCalled()
+  })
+
+  test('status desconhecido não paralisa a fila', async () => {
+    montar(null)
+    await worker.processarItem(item)
+    expect(addGroupParticipant).toHaveBeenCalled()
   })
 })

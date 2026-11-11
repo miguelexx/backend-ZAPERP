@@ -79,6 +79,32 @@ exports.encerrarChat = async (req, res) => {
       return res.status(400).json({ error: 'Grupos são apenas visuais. Não é possível encerrar conversa de grupo.' })
     }
 
+    // Guarda idempotente (doc 40 §3.2, decidido em 11/11/2026): re-encerrar uma conversa JÁ
+    // fechada é no-op com 200 — não registra atendimento nem reenvia a mensagem de finalização.
+    // Antes, duplo clique em "Finalizar" (ou duas abas) dava 2 UPDATEs bem-sucedidos → 2
+    // registros "encerrou" → 2 mensagens de finalização ao cliente. É 200 e não 409 de propósito:
+    // o doc 32 registra que devolver erro depois de a conversa já estar fechada fazia o
+    // frontend reverter o card para "Em atendimento".
+    const lerConversaAtual = async () => {
+      const { data: atual } = await supabase
+        .from('conversas')
+        .select('*')
+        .eq('company_id', company_id)
+        .eq('id', conversa_id)
+        .maybeSingle()
+      return atual || null
+    }
+    if (perm.conv && isClosedAttendanceStatus(perm.conv.status_atendimento)) {
+      const atual = await lerConversaAtual()
+      return res.json({ ok: true, conversa: atual || perm.conv, ja_encerrada: true })
+    }
+    // LOCK REAL (mesmo padrão do reabrirChat): o UPDATE só casa se o status ainda é o que a
+    // checagem de permissão viu. NULL precisa de `.is()` — um `.eq(null)`/`NOT IN` nunca casaria
+    // uma conversa sem status e ela ficaria impossível de encerrar.
+    const statusAntes = perm.conv?.status_atendimento ?? null
+    const comGuardaDeStatus = (q) =>
+      statusAntes == null ? q.is('status_atendimento', null) : q.eq('status_atendimento', statusAntes)
+
     // Colunas que podem não existir em instalações sem os módulos de pagamento / falta de
     // interação. Sem o fallback (que `reabrirChat` já tinha) um "column/schema cache" derrubava
     // o encerramento INTEIRO — o atendente clicava em Encerrar e a conversa não fechava.
@@ -100,25 +126,44 @@ exports.encerrarChat = async (req, res) => {
       reaberta_falta_interacao_em: null,
     }
 
-    let { data, error } = await supabase
-      .from('conversas')
-      .update({ ...baseEncerrarPatch, ...optionalEncerrarPatch })
-      .eq('company_id', company_id)
-      .eq('id', conversa_id)
-      .select()
-      .single()
-
-    if (error && /column|schema cache/i.test(String(error.message || ''))) {
-      ;({ data, error } = await supabase
+    let { data, error } = await comGuardaDeStatus(
+      supabase
         .from('conversas')
-        .update(baseEncerrarPatch)
+        .update({ ...baseEncerrarPatch, ...optionalEncerrarPatch })
         .eq('company_id', company_id)
         .eq('id', conversa_id)
+    )
+      .select()
+      .maybeSingle()
+
+    if (error && /column|schema cache/i.test(String(error.message || ''))) {
+      ;({ data, error } = await comGuardaDeStatus(
+        supabase
+          .from('conversas')
+          .update(baseEncerrarPatch)
+          .eq('company_id', company_id)
+          .eq('id', conversa_id)
+      )
         .select()
-        .single())
+        .maybeSingle())
     }
 
     if (error) { console.error('[chatController]', error?.message); return res.status(500).json({ error: 'Erro interno' }) }
+
+    if (!data) {
+      // Ninguém casou: o status mudou entre a checagem de permissão e o UPDATE.
+      // Fechada por outra pessoa/aba no meio-tempo → o resultado desejado já existe: 200 idempotente.
+      // Mudou para outro estado aberto (transferência/reabertura simultânea) → 409: o
+      // encerramento NÃO aconteceu e o frontend tem de desfazer o otimista.
+      const atual = await lerConversaAtual()
+      if (atual && isClosedAttendanceStatus(atual.status_atendimento)) {
+        return res.json({ ok: true, conversa: atual, ja_encerrada: true })
+      }
+      return res.status(409).json({
+        error: 'A conversa mudou de estado enquanto você encerrava. Atualize e tente de novo.',
+        code: 'CONVERSA_MUDOU_DE_ESTADO',
+      })
+    }
 
     // Campanha (Disparo): conversa encerrada não pode continuar "aguardando resposta de
     // campanha" — senão o próximo inbound reabre via consumirPrimeiraRespostaCampanha,

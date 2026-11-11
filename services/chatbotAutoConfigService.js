@@ -13,6 +13,8 @@
 
 const supabase = require('../config/supabase')
 const { invalidateChatbotConfigCache } = require('./chatbotTriageService')
+const { invalidateFinanceiroSetorCache } = require('../helpers/financeiroSetorHelper')
+const { invalidateAlertaSemRespostaCache } = require('../helpers/reabertaFaltaInteracaoHelper')
 
 /**
  * Configuração padrão do chatbot que será aplicada a todas as empresas
@@ -105,6 +107,8 @@ async function generateChatbotConfig(companyId, customConfig = {}) {
           depts.push(novoDept)
         }
       }
+      // Um dos padrão é "Financeiro": o cache de ids do setor (GET /chats) precisa reler.
+      invalidateFinanceiroSetorCache(companyId)
     }
 
     // Gerar opções do menu baseadas nos departamentos
@@ -165,6 +169,8 @@ async function configureChatbotForCompany(companyId, customConfig = {}) {
 
     console.log(`[ChatbotAutoConfig] ✅ Chatbot configurado para empresa ${companyId}`)
     invalidateChatbotConfigCache(companyId)
+    // O `config` inteiro foi regravado: `isAlertaSemRespostaAtivo` (GET /chats) relê.
+    invalidateAlertaSemRespostaCache(companyId)
     return true
 
   } catch (error) {
@@ -307,6 +313,8 @@ async function toggleChatbotForCompany(companyId, enabled) {
 
     console.log(`[ChatbotAutoConfig] ✅ Chatbot ${enabled ? 'ativado' : 'desativado'} para empresa ${companyId}`)
     invalidateChatbotConfigCache(companyId)
+    // O `config` inteiro foi regravado: `isAlertaSemRespostaAtivo` (GET /chats) relê.
+    invalidateAlertaSemRespostaCache(companyId)
     return true
 
   } catch (error) {
