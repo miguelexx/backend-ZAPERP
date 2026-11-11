@@ -13,6 +13,56 @@ function isBackendChatSearchTerm(raw) {
 }
 
 /**
+ * Marcadores de ordinal/grau que aparecem em nome de turma ("7º", "7°", "7⁰", "1ª").
+ * São caracteres DIFERENTES e o Postgres os trata de formas diferentes dentro de
+ * `search_name_key` (`regexp_replace(unaccent_lower(x), '[^[:alnum:]]+', ' ')`):
+ *   'º' e 'ª' são LETRAS para o Postgres → sobrevivem, viram parte da palavra ("7º anos");
+ *   '°' e '⁰' não são alfanuméricos → viram espaço ("7 anos").
+ * Resultado medido na empresa 4 em 10/11/2026, procurando um grupo chamado "7º ANOS A e B":
+ *   "7º anos" → 2 resultados   |   "7° anos" → 0   |   "7o anos" → 0   |   "7 anos" → 0
+ * Ou seja: só achava quem digitasse exatamente o mesmo caractere que está gravado — e a
+ * base mistura os três ("7º ANOS A e B", "7° Ano C", "7⁰ A e B").
+ */
+const MARCADORES_ORDINAIS = ['º', 'ª', '°', '⁰', '˚']
+const RE_MARCADOR_ORDINAL = new RegExp(`[${MARCADORES_ORDINAIS.join('')}]`, 'g')
+/** Versão sem /g: `test` com /g guarda lastIndex entre chamadas e alterna o resultado. */
+const RE_TEM_MARCADOR = new RegExp(`[${MARCADORES_ORDINAIS.join('')}]`)
+
+/**
+ * Variantes do termo para a busca por nome, cobrindo as formas do ordinal.
+ *
+ * Só gera alternativas quando o termo tem dígito seguido de marcador/espaço/"o" — fora disso
+ * devolve só o próprio termo, para não multiplicar consulta à toa.
+ *
+ * @param {string} termo
+ * @returns {string[]} o termo original primeiro, depois as variantes (sem repetição)
+ */
+function gerarVariantesOrdinais(termo) {
+  const base = String(termo || '').trim()
+  if (!base) return []
+  const out = [base]
+  const add = (v) => {
+    const t = String(v || '').trim().replace(/\s{2,}/g, ' ')
+    if (t && !out.includes(t)) out.push(t)
+  }
+
+  if (RE_TEM_MARCADOR.test(base)) {
+    for (const m of MARCADORES_ORDINAIS) add(base.replace(RE_MARCADOR_ORDINAL, m))
+    add(base.replace(RE_MARCADOR_ORDINAL, ' ')) // "7º anos" → "7 anos"
+    return out
+  }
+
+  // "7 anos" / "7o anos" → tenta também as formas com marcador, que é como está gravado.
+  const comEspaco = base.match(/^(\d{1,2})\s+(.*)$/)
+  const comLetraO = base.match(/^(\d{1,2})[oa]\s+(.*)$/i)
+  const parte = comEspaco || comLetraO
+  if (parte) {
+    for (const m of MARCADORES_ORDINAIS) add(`${parte[1]}${m} ${parte[2]}`)
+  }
+  return out
+}
+
+/**
  * Chave de nome equivalente ao search_name_key(text) do Postgres.
  * A pontuação vira separador de palavra para que "Shuarts/Marcela" possa ser
  * encontrada por "mar", sem fazer "hu" casar no meio de "Shuarts".
@@ -154,6 +204,7 @@ module.exports = {
   buildPhoneSearchTerms,
   digitsOnly,
   isBackendChatSearchTerm,
+  gerarVariantesOrdinais,
   normalizeNameSearchKey,
   nameMatchesWordPrefix,
   chatIdentityMatchesSearch,

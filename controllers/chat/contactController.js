@@ -54,10 +54,22 @@ exports.criarGrupo = async (req, res) => {
         return res.status(status).json({ error: created?.error || 'Não foi possível criar o grupo no WhatsApp.' })
       }
       const gid = String(created.data?.id || created.data?.group_id || created.data?.chat_id || '').trim()
-      const phone = gid
-        ? (gid.toLowerCase().endsWith('@g.us') ? gid : `${gid.replace(/@g\.us$/i, '')}@g.us`)
-        : `grupo_${Date.now()}`
-      const conv = await findOrCreateConversation(supabase, {
+      if (!gid) {
+        // Grupo nasceu no WhatsApp mas o provedor não devolveu o id. Criar uma conversa com
+        // telefone `grupo_<timestamp>` aqui seria pior que o erro: ela não aponta para grupo
+        // nenhum, não recebe mensagem e ainda aparece duplicada ao lado da conversa real.
+        console.error('[criarGrupo] provedor criou o grupo sem devolver id', created?.data)
+        return res.status(502).json({
+          error: 'O grupo foi criado no WhatsApp, mas o provedor não devolveu o identificador. Sincronize os grupos para trazê-lo.',
+        })
+      }
+      const phone = gid.toLowerCase().endsWith('@g.us') ? gid : `${gid.replace(/@g\.us$/i, '')}@g.us`
+      // findOrCreateConversation devolve { conversa, created } — e NÃO a conversa direto.
+      // Lendo `conv?.id` o resultado era sempre undefined, a função caía no insert de
+      // emergência abaixo e TODO grupo criado pelo sistema nascia DUPLICADO: a conversa certa
+      // (com o id @g.us) e uma fantasma com telefone `grupo_<timestamp>`, que é a que a API
+      // devolvia para a tela. Medido na empresa 4 em 10/11/2026: 4 pares assim.
+      const resultado = await findOrCreateConversation(supabase, {
         company_id,
         phone,
         isGroup: true,
@@ -65,10 +77,13 @@ exports.criarGrupo = async (req, res) => {
         whatsapp_instance_id: instance.id,
         io,
       })
+      const conv = resultado?.conversa || null
       if (conv?.id) {
         emitirEventoEmpresaConversa(io, company_id, conv.id, 'nova_conversa', conv)
         return res.json(conv)
       }
+      console.error('[criarGrupo] não foi possível criar a conversa do grupo', phone)
+      return res.status(500).json({ error: 'O grupo foi criado no WhatsApp, mas não foi possível abrir a conversa aqui.' })
     }
 
     const { data, error } = await supabase

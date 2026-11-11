@@ -14,7 +14,7 @@ const { getDisplayName, pickConversationDisplayName } = require('../../helpers/c
 const { empresaModoSimplesAtivo } = require('../../helpers/empresaModoSimplesFlag')
 const { resolveGrupoIdsComUnreadParaUsuario, applyAguardandoAtendenteModoSimplesQuery, rowAguardandoAtendenteModoSimples } = require('../../helpers/modoSimplesGrupoUnread')
 const { usuarioPertenceSetorFinanceiro } = require('../../helpers/financeiroSetorHelper')
-const { buildClienteSearchOr, buildTelefoneSearchOr, buildPhoneSearchTerms, chatIdentityMatchesSearch } = require('../../helpers/chatSearchHelper')
+const { buildClienteSearchOr, buildTelefoneSearchOr, buildPhoneSearchTerms, chatIdentityMatchesSearch, gerarVariantesOrdinais } = require('../../helpers/chatSearchHelper')
 const { buscarConversaIdsPorNomesVinculados, buscarClienteIdsPorNomeVinculado, anexarVinculosEmBusca } = require('../../helpers/clienteNomesVinculados')
 const { getGrupoIdsPorDepartamentos, getGrupoIdsSemDepartamento, getGrupoIdsFixadosPeloUsuario, pushNonGroupVisibilityParts, pushAtendenteFilaLivreVisibilityParts, pushAllowedGroupIdsPart } = require('../../helpers/departamentoGruposHelper')
 const { countConversasWithFilter, overridesFromListQuery, parseConversaIdsQuery, getStartOfTodayIso, getEndOfTodayIso } = require('../../services/chatListCountsService')
@@ -260,17 +260,25 @@ exports.listarConversas = async (req, res) => {
       //   (2) Telefone direto em conversas (com variantes BR)
       //   (3) Texto de mensagens (paginado) — apenas quando explicitamente habilitado
       const [convByNomeIds, { data: convByTelefone }, idsFromMsg, idsPorVinculo] = await Promise.all([
-        supabase
-          .rpc('buscar_conversas_por_nome_ids', {
-            p_company_id: Number(company_id),
-            p_termo: palavraTrim,
-            p_phone_variacoes: phoneVariacoes.length ? phoneVariacoes : null,
-            p_limit: searchIdLimit,
-          })
-          .then(({ data, error }) => {
-            if (error) console.warn('[busca-nome] RPC error:', error.message)
-            return Array.isArray(data) ? data : []
-          }),
+        // "7º", "7°", "7⁰" e "7 " são caracteres diferentes e o `search_name_key` do Postgres
+        // trata cada um de um jeito: só achava o grupo quem digitasse exatamente o que está
+        // gravado. Como a base mistura as três formas, a busca por nome roda sobre as variantes
+        // (ver gerarVariantesOrdinais). Termo sem ordinal gera UMA variante — nada muda.
+        Promise.all(
+          gerarVariantesOrdinais(palavraTrim).map((variante) =>
+            supabase
+              .rpc('buscar_conversas_por_nome_ids', {
+                p_company_id: Number(company_id),
+                p_termo: variante,
+                p_phone_variacoes: phoneVariacoes.length ? phoneVariacoes : null,
+                p_limit: searchIdLimit,
+              })
+              .then(({ data, error }) => {
+                if (error) console.warn('[busca-nome] RPC error:', error.message)
+                return Array.isArray(data) ? data : []
+              })
+          )
+        ).then((listas) => listas.flat()),
         supabase
           .from('conversas')
           .select('id')
