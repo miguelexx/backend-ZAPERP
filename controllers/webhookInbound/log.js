@@ -3,11 +3,11 @@
  * Extraído de controllers/webhookZapiController.js (Fase 4 — doc 24) sem alteração de comportamento.
  */
 
-const { whatsappDebugAtivo } = require('../../helpers/whatsappDebug')
+const WHATSAPP_DEBUG = String(process.env.WHATSAPP_DEBUG || '').toLowerCase() === 'true'
 
-/** Log [ZAPI_CERT] uma linha por ação — só quando WHATSAPP_DEBUG=1 (apenas dev). Sem token, sem conteúdo da msg. */
+/** Log [ZAPI_CERT] uma linha por ação — só quando WHATSAPP_DEBUG=true (apenas dev). Sem token, sem conteúdo da msg. */
 function logZapiCert(opts) {
-  if (!whatsappDebugAtivo()) return
+  if (!WHATSAPP_DEBUG) return
   const ts = new Date().toISOString()
   const line = JSON.stringify({
     ts,
@@ -16,8 +16,7 @@ function logZapiCert(opts) {
     type: opts.type ?? null,
     fromMe: opts.fromMe ?? null,
     hasDest: opts.hasDest ?? null,
-    // 4 últimos dígitos, seja qual for a cauda que o chamador passou (doc 29 §3 item 15).
-    phoneTail: opts.phoneTail ? '****' + String(opts.phoneTail).replace(/\D/g, '').slice(-4) : null,
+    phoneTail: opts.phoneTail ?? null,
     connectedTail: opts.connectedTail ?? null,
     messageId: opts.messageId ? String(opts.messageId).slice(0, 24) + (String(opts.messageId).length > 24 ? '…' : '') : null,
     resolvedKeyType: opts.resolvedKeyType ?? null,

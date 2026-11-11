@@ -44,26 +44,6 @@ function comoChatId(jid) {
 }
 
 /**
- * Endereços a tentar, do mais provável ao menos — SEMPRE como JID completo.
- *
- * `checkPhones` nem sempre está disponível: o canal da empresa 4 responde
- * `401 need channel authorization for check phones`. Sem um plano B, a correção do endereço
- * caía de volta no número cru e o adapter reinseria o 9º dígito. Então, quando não dá para
- * verificar, tentamos as duas formas do 9º dígito — a mesma política de `runOnChatCandidates`.
- */
-function candidatosChatId(numero) {
-  const d = somenteDigitos(numero)
-  if (!d) return []
-  let formas = [d]
-  try {
-    const { possiblePhonesForWhatsappIdentity } = require('../../../helpers/phoneHelper')
-    const alt = possiblePhonesForWhatsappIdentity(d)
-    if (Array.isArray(alt) && alt.length) formas = alt
-  } catch { /* fica com o número como veio */ }
-  return [...new Set(formas.map(somenteDigitos).filter(Boolean))].map(comoChatId)
-}
-
-/**
  * Resolve o endereço de vários telefones de uma vez (uma chamada só).
  *
  * Nunca transforma falha de consulta em "não existe": sem resposta, devolve o número original
@@ -81,9 +61,7 @@ async function resolverEnderecosWhatsapp(provider, telefones, opts = {}) {
   const unicos = [...new Set(lista)]
   if (unicos.length === 0) return []
 
-  const semVerificar = unicos.map((original) => ({
-    original, jid: original, chatId: '', candidatos: candidatosChatId(original), existe: true, verificado: false,
-  }))
+  const semVerificar = unicos.map((original) => ({ original, jid: original, chatId: '', existe: true, verificado: false }))
   if (typeof provider?.checkPhones !== 'function') return semVerificar
 
   let linhas
@@ -104,34 +82,25 @@ async function resolverEnderecosWhatsapp(provider, telefones, opts = {}) {
 
   return unicos.map((original) => {
     const linha = porInput.get(original)
-    if (!linha) return { original, jid: original, chatId: '', candidatos: candidatosChatId(original), existe: true, verificado: false }
-    if (linha.exists === false) return { original, jid: original, chatId: '', candidatos: [], existe: false, verificado: true }
+    if (!linha) return { original, jid: original, chatId: '', existe: true, verificado: false }
+    if (linha.exists === false) return { original, jid: original, chatId: '', existe: false, verificado: true }
     const waId = somenteDigitos(linha.waId)
     const jid = waId || original
     // Só vira chatId quando o WhatsApp confirmou o endereço: mandar `@s.whatsapp.net` de um
     // número não verificado tiraria do adapter a chance de tentar a outra forma do 9º dígito.
-    // Verificado: o endereço é um só, não há o que tentar.
-    return {
-      original, jid, chatId: waId ? comoChatId(waId) : '',
-      candidatos: waId ? [comoChatId(waId)] : candidatosChatId(original),
-      existe: true, verificado: true,
-    }
+    return { original, jid, chatId: waId ? comoChatId(waId) : '', existe: true, verificado: true }
   })
 }
 
 /** Atalho para um telefone só. */
 async function resolverEnderecoWhatsapp(provider, telefone, opts = {}) {
   const [endereco] = await resolverEnderecosWhatsapp(provider, [telefone], opts)
-  return endereco || {
-    original: somenteDigitos(telefone), jid: somenteDigitos(telefone), chatId: '',
-    candidatos: candidatosChatId(telefone), existe: true, verificado: false,
-  }
+  return endereco || { original: somenteDigitos(telefone), jid: somenteDigitos(telefone), chatId: '', existe: true, verificado: false }
 }
 
 module.exports = {
   somenteDigitos,
   comoChatId,
-  candidatosChatId,
   resolverEnderecosWhatsapp,
   resolverEnderecoWhatsapp,
 }

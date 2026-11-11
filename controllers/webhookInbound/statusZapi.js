@@ -9,7 +9,6 @@ const { getCompanyIdByInstanceId } = require('../../services/whatsappConfigServi
 const { getWhatsappInstanceByProviderInstanceId } = require('../../services/whatsappInstanceService')
 const { normalizeMessageAckStatus, canonStatusForEmit, resolveAckEffectiveStatus } = require('../../helpers/messageStatusHelper')
 const { isUltramsgNumericQueueId } = require('../../helpers/whatsappMessageIdHelper')
-const { whatsappDebugAtivo } = require('../../helpers/whatsappDebug')
 const {
   selectSingleMensagemByWhatsappId,
   selectSingleMensagemByWhatsappIdRelaxed,
@@ -146,7 +145,7 @@ exports._ackTardio = {
 
 exports.statusZapi = async (req, res) => {
   try {
-    if ((req.path || '').includes('statusht') && whatsappDebugAtivo()) {
+    if ((req.path || '').includes('statusht')) {
       console.log('[Z-API] alias_hit: /statusht -> handler status (ticks ✓✓)')
     }
     const body = req.body || {}
@@ -170,10 +169,7 @@ exports.statusZapi = async (req, res) => {
         company_id = null
       }
       const instanceIdResolved = instanceIdRaw ? instanceIdRaw.slice(0, 24) + (instanceIdRaw.length > 24 ? '…' : '') : '(empty)'
-      // Resolve OK é uma linha por ACK: só com WHATSAPP_DEBUG (doc 29 §3 item 15). not_mapped continua sempre.
-      if (company_id == null || whatsappDebugAtivo()) {
-        _logWebhookSafe({ eventType: 'MessageStatusCallback', instanceId: instanceIdResolved, companyIdResolved: company_id != null ? company_id : 'not_mapped' })
-      }
+      _logWebhookSafe({ eventType: 'MessageStatusCallback', instanceId: instanceIdResolved, companyIdResolved: company_id != null ? company_id : 'not_mapped' })
       if (company_id == null) return res.status(200).json({ ok: true })
     }
 
@@ -188,7 +184,7 @@ exports.statusZapi = async (req, res) => {
     const statusNorm = normalizeMessageAckStatus(body)
 
     // Debug: log toda requisição recebida em /webhooks/ultramsg/status (apenas com WHATSAPP_DEBUG=1)
-    const logDebug = whatsappDebugAtivo()
+    const logDebug = process.env.WHATSAPP_DEBUG === '1'
     if (logDebug) {
       console.log('[DEBUG] /webhooks/ultramsg/status recebido:', {
         ids: idsToProcess.length ? idsToProcess.slice(0, 3).map((id) => id.slice(0, 24) + (id.length > 24 ? '…' : '')) : null,

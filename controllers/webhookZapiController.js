@@ -29,7 +29,6 @@ const { selectClienteNomeFoto } = require('../helpers/clienteNomeColunas')
 const { parseVcardForContact } = require('../helpers/vcardHelper')
 const { resolvePeerPhone } = require('../helpers/conversationKeyHelper')
 const { telefoneParaLog, textoParaLog, nomeParaLog } = require('../helpers/redactLogPII')
-const { whatsappDebugAtivo, logDebug } = require('../helpers/whatsappDebug')
 const { incrementarUnreadParaConversa, emitirParaUsuariosQuePodemVerConversa } = require('./chatController')
 const { emitirMudancaSetorRealtime, setorRealtimeMudou } = require('../services/chat/realtime/chatRealtimeGateway')
 const { normalizarTimestampSemFusoAmbiguoParaApi } = require('../helpers/timestampApiCompat')
@@ -87,6 +86,7 @@ const {
 } = require('../helpers/messageStatusHelper')
 
 // company_id NUNCA mais via ENV — resolvido por instanceId do payload em cada webhook
+const WHATSAPP_DEBUG = String(process.env.WHATSAPP_DEBUG || '').toLowerCase() === 'true'
 // Seleção enxuta para evitar payload desnecessário em caminhos quentes de webhook.
 // IMPORTANTE: não depender de colunas opcionais para manter compatibilidade com bancos legados.
 const WEBHOOK_MSG_SELECT = 'id, conversa_id, company_id, whatsapp_instance_id, whatsapp_id, texto, url, tipo, direcao, criado_em, status, autor_usuario_id, reply_meta, nome_arquivo, contact_meta, location_meta, remetente_nome, remetente_telefone'
@@ -227,21 +227,18 @@ exports.receberZapi = async (req, res) => {
     let whatsapp_instance_id = _tenant.whatsapp_instance_id
     let whatsapp_instance_is_default = _tenant.whatsapp_instance_is_default
 
-    // 2) Log DEV uma linha — diagnóstico sem vazar tokens. Só com WHATSAPP_DEBUG (doc 29 §3
-    //    item 15): é uma linha por REQUISIÇÃO, inclusive ACKs; no caminho de sucesso as linhas
-    //    "📩 recebida" / "✅ salva" já dizem o que chegou. Telefone mascarado (4 últimos dígitos).
+    // 2) Log DEV uma linha — diagnóstico sem vazar tokens
     const firstPayload = getPayloads(body)[0] || body
     const msgId = firstPayload?.messageId ?? firstPayload?.zaapId ?? firstPayload?.id ?? ''
-    if (whatsappDebugAtivo()) {
-      console.log('[ULTRAMSG_WEBHOOK]', JSON.stringify({
-        instanceId: instanceId.slice(0, 20) + (instanceId.length > 20 ? '…' : ''),
-        companyId: company_id,
-        type: body.type || body.event || firstPayload?.type || 'unknown',
-        messageId: msgId ? String(msgId).slice(0, 20) + (String(msgId).length > 20 ? '…' : '') : null,
-        phone: firstPayload?.phone ? telefoneParaLog(firstPayload.phone) : null,
-        fromMe: firstPayload?.fromMe ?? firstPayload?.key?.fromMe ?? null
-      }))
-    }
+    const phoneTail = (firstPayload?.phone || '').toString().trim().slice(-10)
+    console.log('[ULTRAMSG_WEBHOOK]', JSON.stringify({
+      instanceId: instanceId.slice(0, 20) + (instanceId.length > 20 ? '…' : ''),
+      companyId: company_id,
+      type: body.type || body.event || firstPayload?.type || 'unknown',
+      messageId: msgId ? String(msgId).slice(0, 20) + (String(msgId).length > 20 ? '…' : '') : null,
+      phone: phoneTail ? '…' + phoneTail : null,
+      fromMe: firstPayload?.fromMe ?? firstPayload?.key?.fromMe ?? null
+    }))
 
     // Salva no buffer de diagnóstico (GET /webhooks/ultramsg/debug)
     _logWebhook({
@@ -252,7 +249,7 @@ exports.receberZapi = async (req, res) => {
       hasMedia: !!(body.image || body.audio || body.video || body.document || body.sticker),
       status: body.status || body.ack,
       ip: req.ip || req.socket?.remoteAddress || '?',
-      rawBody: whatsappDebugAtivo() ? JSON.stringify(body).slice(0, 600) : undefined
+      rawBody: WHATSAPP_DEBUG ? JSON.stringify(body).slice(0, 600) : undefined
     })
 
     // Callback específico de atualização de foto de grupo (payload só { groupId, groupPhoto })
@@ -320,15 +317,13 @@ exports.receberZapi = async (req, res) => {
         payload?.ack != null ? String(payload.ack).trim() : String(payload?.status ?? '').trim()
       const payloadTypeOrStatus = payloadType || payloadStatusRaw.toLowerCase()
 
-      if (whatsappDebugAtivo()) {
+      if (WHATSAPP_DEBUG) {
         const msgId = payload?.messageId ?? payload?.zaapId ?? payload?.id ?? payload?.key?.id
-        const dbgFrom = payload?.senderPhone ?? payload?.from ?? payload?.phone ?? ''
-        const dbgTo = payload?.to ?? payload?.recipientPhone ?? ''
         console.log('[Z-API] webhook payload', {
           eventType: payloadType || '(vazio)',
           messageId: msgId ? String(msgId).slice(0, 32) : null,
-          from: dbgFrom ? telefoneParaLog(dbgFrom) : '',
-          to: dbgTo ? telefoneParaLog(dbgTo) : '',
+          from: (payload?.senderPhone ?? payload?.from ?? payload?.phone ?? '').toString().slice(-14),
+          to: (payload?.to ?? payload?.recipientPhone ?? '').toString().slice(-14),
           chatId: (payload?.chatId ?? payload?.key?.remoteJid ?? '').toString().slice(0, 36),
           fromMe: Boolean(payload?.fromMe ?? payload?.key?.fromMe),
           hasText: !!(payload?.text?.message ?? payload?.message ?? payload?.body)
@@ -380,11 +375,8 @@ exports.receberZapi = async (req, res) => {
           payloadType === 'receivedcallback_ack' ||
           (STATUS_ONLY_KEYWORDS.includes(payloadStatusRaw.toLowerCase()) && (payload?.messageId || payload?.zaapId)))
 
-      // Log de pipeline — só com WHATSAPP_DEBUG (doc 29 §3 item 15): corria em TODO payload,
-      // inclusive em cada ACK. Com a flag ligada, telefone sai mascarado.
-      if (whatsappDebugAtivo()) {
-        console.log(`[ULTRAMSG] 🔍 pipeline: type="${payloadType || '(vazio)'}" status="${payloadStatusRaw || '(vazio)'}" fromMe=${payloadFromMe} hasContent=${hasMessageContent} isStatus=${isStatusCallback} phone=${payload?.phone ? telefoneParaLog(payload.phone) : '(vazio)'}`)
-      }
+      // Log de pipeline — sempre visível, para rastrear o que chega e como é classificado
+      console.log(`[ULTRAMSG] 🔍 pipeline: type="${payloadType || '(vazio)'}" status="${payloadStatusRaw || '(vazio)'}" fromMe=${payloadFromMe} hasContent=${hasMessageContent} isStatus=${isStatusCallback} phone=${String(payload?.phone || '').slice(-10) || '(vazio)'}`)
 
       // ─── Cliente apagou "para todos" (revogação do contato) ───
       // Só o contato (fromMe=false) e nunca quando há conteúdo real (para não apagar mensagem
@@ -438,8 +430,7 @@ exports.receberZapi = async (req, res) => {
         const effectiveStatus = msg?._effective_status || statusNorm
         if (msg) {
           emitStatusMsg(msg, effectiveStatus, String(msgId))
-          // Só com WHATSAPP_DEBUG: um ACK por tique (sent/delivered/read) de CADA mensagem enviada.
-          logDebug(`✅ Z-API status ${effectiveStatus.toUpperCase()} → msg ${msg.id} (conversa ${msg.conversa_id})`)
+          console.log(`✅ Z-API status ${effectiveStatus.toUpperCase()} → msg ${msg.id} (conversa ${msg.conversa_id})`)
           logZapiCert({
             companyId: company_id,
             instanceId,
@@ -487,9 +478,9 @@ exports.receberZapi = async (req, res) => {
             payload?.message?.sticker != null || payload?.message?.stickerUrl != null ||
             payload?.message?.ptv != null || payload?.message?.location != null || payload?.message?.contact != null
 
-          logDebug('[Z-API] DeliveryCallback fromMe:', {
+          console.log('[Z-API] DeliveryCallback fromMe:', {
             messageId: delivMsgId ? String(delivMsgId).slice(0, 32) : null,
-            phone: payload?.phone ? telefoneParaLog(payload.phone) : null,
+            phone: (payload?.phone || '').toString().slice(-12),
             hasRealContent
           })
 
@@ -551,7 +542,7 @@ exports.receberZapi = async (req, res) => {
         const errorText = payload?.error != null ? String(payload.error) : ''
 
         if (!messageId) {
-          console.log('📦 Z-API DeliveryCallback (sem messageId):', phoneDest ? telefoneParaLog(phoneDest) : '(sem phone)')
+          console.log('📦 Z-API DeliveryCallback (sem messageId):', phoneDest ? String(phoneDest).slice(-12) : '(sem phone)')
           continue
         }
 
@@ -748,7 +739,7 @@ exports.receberZapi = async (req, res) => {
         }
 
         if (errorText) {
-          console.warn('❌ Z-API DeliveryCallback erro:', telefoneParaLog(phoneDest), String(errorText).slice(0, 220))
+          console.warn('❌ Z-API DeliveryCallback erro:', String(phoneDest || '').slice(-12), String(errorText).slice(0, 220))
         }
 
         if (!error && msg) {
@@ -799,7 +790,7 @@ exports.receberZapi = async (req, res) => {
         const msgId = payload?.messageId ?? payload?.zaapId ?? payload?.id ?? payload?.key?.id ?? null
         const statusRaw = payload?.ack != null ? String(payload.ack).trim() : String(payload?.status ?? '').trim()
         const statusNorm = statusRaw ? normalizeZapiStatus(statusRaw) : null
-        if (whatsappDebugAtivo()) console.log('[ULTRAMSG_WEBHOOK]', JSON.stringify({ companyIdResolved: company_id, messageId: msgId ? String(msgId).slice(0, 20) : null, status: statusNorm, note: 'self_echo' }))
+        console.log('[ULTRAMSG_WEBHOOK]', JSON.stringify({ companyIdResolved: company_id, messageId: msgId ? String(msgId).slice(0, 20) : null, status: statusNorm, note: 'self_echo' }))
         if (msgId) {
           const { data: existing } = await selectSingleMensagemByWhatsappId(supabase, {
             company_id,
@@ -890,26 +881,23 @@ exports.receberZapi = async (req, res) => {
         console.log('[ULTRAMSG] ⏭️ status/broadcast — não é conversa privada (chatbot não dispara)', {
           fromMe,
           type,
-          phone: phone ? telefoneParaLog(phone) : null,
+          phoneTail: phone ? String(phone).slice(-8) : null,
         })
         lastResult = { ok: true, ignored: 'status_broadcast' }
         continue
       }
 
-      // ── Log de resolução de chave — só com WHATSAPP_DEBUG (doc 29 §3 item 15). O caso que
-      // importa (chave vazia → DROPPED) continua logado como warn logo abaixo, sempre. ──
-      if (whatsappDebugAtivo()) {
-        console.log('[ULTRAMSG] 📞 resolveKey:', {
-          type: payload?.type ?? payload?.event ?? '(sem type)',
-          fromMe,
-          isGroup,
-          phone_raw: payload?.phone ? telefoneParaLog(payload.phone) : '(vazio)',
-          connectedPhone_tail: (payload?.connectedPhone ?? '').toString().slice(-4) || '(ausente)',
-          resolvedKey: phone ? telefoneParaLog(phone) : '❌ VAZIO → SERÁ DROPADO',
-          messageId: messageId ? String(messageId).slice(0, 20) : null,
-          reason: debugReason,
-        })
-      }
+      // ── Log de resolução de chave — SEMPRE visível (crítico para diagnóstico) ──
+      console.log('[ULTRAMSG] 📞 resolveKey:', {
+        type: payload?.type ?? payload?.event ?? '(sem type)',
+        fromMe,
+        isGroup,
+        phone_raw: (payload?.phone ?? '').toString().slice(-14) || '(vazio)',
+        connectedPhone_tail: (payload?.connectedPhone ?? '').toString().slice(-6) || '(ausente)',
+        resolvedKey: phone ? ('...' + String(phone).slice(-8)) : '❌ VAZIO → SERÁ DROPADO',
+        messageId: messageId ? String(messageId).slice(0, 20) : null,
+        reason: debugReason,
+      })
 
       if (!phone) {
         logZapiCert({
@@ -944,7 +932,7 @@ exports.receberZapi = async (req, res) => {
           messageId: payload?.messageId,
           status: payload?.status,
         }
-        if (whatsappDebugAtivo() && (payload?.data != null || payload?.key != null || payload?.value != null)) {
+        if (WHATSAPP_DEBUG && (payload?.data != null || payload?.key != null || payload?.value != null)) {
           droppedMeta.data = payload?.data
           droppedMeta.key = payload?.key
           droppedMeta.value = payload?.value
@@ -986,7 +974,7 @@ exports.receberZapi = async (req, res) => {
       const isLidKey = String(phone).startsWith('lid:')
 
       if (isLidKey) {
-        logDebug('[Z-API] LID key — conversa sem cliente vinculado (número real não disponível):', phone)
+        console.log('[Z-API] LID key — conversa sem cliente vinculado (número real não disponível):', phone)
       } else {
         const nomePayloadRaw = fromMe
           ? (payload.name ?? payload.formattedName ?? payload.chatName ?? payload.chat?.name ?? payload.groupName ?? payload.short ?? payload.notifyName ?? payload.senderName ?? payload.displayName ?? payload.pushName ?? null)
@@ -1225,7 +1213,7 @@ exports.receberZapi = async (req, res) => {
           .maybeSingle()
         if (convRow && convRow.cliente_id == null) {
           await supabase.from('conversas').update({ cliente_id }).eq('id', conversa_id).eq('company_id', company_id)
-          logDebug('[Z-API] Conversa vinculada ao cliente', { conversa_id, cliente_id })
+          console.log('[Z-API] Conversa vinculada ao cliente', { conversa_id, cliente_id })
         }
       }
 
@@ -1429,7 +1417,7 @@ exports.receberZapi = async (req, res) => {
           console.log('[Z-API] 🔒 Conversa mantida fechada — eco da nossa mensagem (não reabre, não dispara boas-vindas)', {
             conversa_id,
             reason: outboundEcho.reason,
-            texto: textoParaLog(texto),
+            texto: String(texto || '').slice(0, 80),
           })
           lastResult = { ok: true, conversa_id, skip: 'own_outbound_echo_closed' }
           continue
@@ -1443,7 +1431,7 @@ exports.receberZapi = async (req, res) => {
           console.log('[Z-API] ⚠️ Padrão de eco SEM corroboração — mensagem será persistida; conversa permanece fechada', {
             conversa_id,
             reason: outboundEcho.reason,
-            texto: textoParaLog(texto),
+            texto: String(texto || '').slice(0, 80),
           })
         }
         if (!skipReopenPorEcoFraco && !inboundEhReacao && motivoFinalizacao === 'ausencia_cliente') {
@@ -1618,21 +1606,21 @@ exports.receberZapi = async (req, res) => {
               }
               console.log('[Z-API] 🔄 Conversa reaberta automaticamente após encerramento — chatbot reiniciado', {
                 conversa_id,
-                texto: textoParaLog(textoNorm),
+                texto: textoNorm,
                 reason: reopenDecision.reason
               })
             }
           } else {
             console.log('[Z-API] 🔒 Conversa mantida fechada (avaliação, agradecimento ou ACK de encerramento)', {
               conversa_id,
-              texto: textoParaLog(textoNorm),
+              texto: textoNorm,
               reason: reopenDecision.reason
             })
           }
         } else if (absenceReopenExplicitlyDisabled) {
           console.log('[Z-API] 🔒 Conversa mantida fechada — reabertura automática por ausência desativada', {
             conversa_id,
-            texto: textoParaLog(textoNorm),
+            texto: textoNorm,
             motivo_finalizacao: motivoFinalizacao,
           })
         }
@@ -1665,9 +1653,9 @@ exports.receberZapi = async (req, res) => {
       const telefoneConv = convRow?.telefone
       if (telefoneConv && !String(telefoneConv).startsWith('lid:')) {
         phoneParaChatbot = telefoneConv
-        logDebug('[Z-API] 🤖 Chatbot: usando telefone da conversa (payload tinha LID):', telefoneParaLog(telefoneConv))
+        console.log('[Z-API] 🤖 Chatbot: usando telefone da conversa (payload tinha LID):', telefoneConv?.slice(-8))
       } else {
-        logDebug('[Z-API] 🤖 Chatbot: ignorado — phone é LID e conversa não tem número real para envio')
+        console.log('[Z-API] 🤖 Chatbot: ignorado — phone é LID e conversa não tem número real para envio')
         phoneParaChatbot = null
       }
     }
@@ -1711,7 +1699,7 @@ exports.receberZapi = async (req, res) => {
         payload,
       })
       if (!chatbotEligibility.ok) {
-        logDebug('[Z-API] 🤖 Chatbot: ignorado — origem não é mensagem privada real do contato', {
+        console.log('[Z-API] 🤖 Chatbot: ignorado — origem não é mensagem privada real do contato', {
           conversa_id,
           company_id,
           reason: chatbotEligibility.reason,
@@ -1840,7 +1828,7 @@ exports.receberZapi = async (req, res) => {
           if (botLogAtivo) {
             // Bot já estava ativo — sempre processar (cliente está respondendo ao menu do bot)
             chatbotHints.menuAlreadySent = true
-            logDebug('[Z-API] 🤖 Chatbot: conversa com bot ativo (bot_logs) — processando resposta', {
+            console.log('[Z-API] 🤖 Chatbot: conversa com bot ativo (bot_logs) — processando resposta', {
               conversa_id, tipo: botLogAtivo.tipo
             })
           } else {
@@ -1853,26 +1841,26 @@ exports.receberZapi = async (req, res) => {
               .order('criado_em', { ascending: true })
               .limit(25)
 
-            logDebug('[Z-API] 🤖 Chatbot: verificando histórico (sem bot_logs)', {
+            console.log('[Z-API] 🤖 Chatbot: verificando histórico (sem bot_logs)', {
               conversa_id,
               totalMensagens: mensagensAnteriores?.length || 0,
               primeiraMensagem: mensagensAnteriores?.[0]
-                ? { direcao: mensagensAnteriores[0].direcao, texto: textoParaLog(mensagensAnteriores[0].texto) }
+                ? { direcao: mensagensAnteriores[0].direcao, texto: String(mensagensAnteriores[0].texto || '').slice(0, 30) }
                 : null
             })
 
             if (!mensagensAnteriores || mensagensAnteriores.length === 0) {
               chatbotHints.menuAlreadySent = false
               chatbotHints.isPrimeiraMensagemCliente = true
-              logDebug('[Z-API] 🤖 Chatbot: primeira mensagem do cliente — permitindo chatbot', { conversa_id })
+              console.log('[Z-API] 🤖 Chatbot: primeira mensagem do cliente — permitindo chatbot', { conversa_id })
             } else {
               const primeiraMsg = mensagensAnteriores[0]
               if (primeiraMsg?.direcao === 'out') {
                 skipChatbot = true
                 chatbotHints.menuAlreadySent = false
                 chatbotHints.isPrimeiraMensagemCliente = false
-                logDebug('[Z-API] 🤖 Chatbot: ignorado — operador iniciou a conversa (1ª msg foi direcao out)', {
-                  conversa_id, primeiraMsg: textoParaLog(primeiraMsg.texto)
+                console.log('[Z-API] 🤖 Chatbot: ignorado — operador iniciou a conversa (1ª msg foi direcao out)', {
+                  conversa_id, primeiraMsg: String(primeiraMsg.texto || '').slice(0, 30)
                 })
               } else {
                 // Cliente falou primeiro, mas já pode existir resposta do bot (menu) — ex.: [in, out, in atual]
@@ -1880,13 +1868,13 @@ exports.receberZapi = async (req, res) => {
                 if (temRespostaBot) {
                   chatbotHints.menuAlreadySent = true
                   chatbotHints.isPrimeiraMensagemCliente = false
-                  logDebug('[Z-API] 🤖 Chatbot: histórico já tem msg do bot — cliente respondendo ao menu', {
+                  console.log('[Z-API] 🤖 Chatbot: histórico já tem msg do bot — cliente respondendo ao menu', {
                     conversa_id,
                   })
                 } else {
                   chatbotHints.menuAlreadySent = false
                   chatbotHints.isPrimeiraMensagemCliente = true
-                  logDebug('[Z-API] 🤖 Chatbot: cliente iniciou a conversa — permitindo chatbot', {
+                  console.log('[Z-API] 🤖 Chatbot: cliente iniciou a conversa — permitindo chatbot', {
                     conversa_id, totalMensagensCliente: mensagensAnteriores.filter(m => m.direcao === 'in').length
                   })
                 }
@@ -1948,7 +1936,7 @@ exports.receberZapi = async (req, res) => {
         }
 
         if (!skipChatbot) {
-          logDebug('[Z-API] 🤖 Chatbot: processando mensagem', { company_id, conversa_id, phone: telefoneParaLog(phoneParaChatbot) })
+          console.log('[Z-API] 🤖 Chatbot: processando mensagem', { company_id, conversa_id, phoneTail: String(phoneParaChatbot).slice(-8) })
           const ioChatbot = req.app.get('io')
           const emitChatbotRealtime =
             ioChatbot &&
@@ -2195,7 +2183,7 @@ exports.receberZapi = async (req, res) => {
                 .select(WEBHOOK_MSG_SELECT)
                 .single()
               mensagemSalva = updMsg || existente
-              if (whatsappDebugAtivo() || hasMediaToUpdate) console.log('[Z-API] idempotência: mensagem atualizada com mídia/placeholder', existente.id, Object.keys(upFields))
+              if (WHATSAPP_DEBUG || hasMediaToUpdate) console.log('[Z-API] idempotência: mensagem atualizada com mídia/placeholder', existente.id, Object.keys(upFields))
               // Emitir nova_mensagem para frontend atualizar player de áudio quando URL chega via webhook_message_download_media
               if (hasMediaToUpdate && req.app?.get('io')) {
                 const io2 = req.app.get('io')
@@ -2476,9 +2464,8 @@ exports.receberZapi = async (req, res) => {
         }
       }
 
-      // 2ª (e última) linha do caminho de sucesso — telefone mascarado (doc 29 §3 item 15).
-      console.log('✅ Mensagem salva no sistema:', { conversa_id, mensagem_id: mensagemSalva.id, phone: telefoneParaLog(phone), direcao: fromMe ? 'out' : 'in' })
-      if (fromMe) logDebug('📤 Espelhamento: mensagem enviada pelo celular registrada no sistema')
+      console.log('✅ Mensagem salva no sistema:', { conversa_id, mensagem_id: mensagemSalva.id, phone: phone?.slice(-6), direcao: fromMe ? 'out' : 'in' })
+      if (fromMe) console.log('📤 Espelhamento: mensagem enviada pelo celular registrada no sistema')
 
       if (fromMe && !isGroup && company_id && convIdForUpdate && (mensagemSalva.whatsapp_id || mensagemSalva.id)) {
         try {
@@ -2603,22 +2590,15 @@ exports.receberZapi = async (req, res) => {
       // NÃO emitir atualizar_conversa para mensagens enviadas por nós (fromMe)
       // — evita refetch que causa duplicação visual e flicker. status_mensagem já atualiza os ticks.
       // Só emitir para mensagens recebidas (inseridas pelo webhook)
-      //
-      // `motivo: 'nova_mensagem'` (doc 40 §3.1): o `conversa_atualizada` logo abaixo já leva o
-      // payload completo do card, então o frontend que conhece o flag NÃO refaz `GET /chats/:id`
-      // para uma conversa que já tem na lista — era 1 detalhe completo (histórico + marcação de
-      // leitura + sync do contato) por usuário visível, por mensagem recebida. Frontend antigo
-      // ignora o campo extra e continua como antes.
       if (!fromMe) {
-        const atualizarPayload = { id: convIdForEmit, motivo: 'nova_mensagem' }
         const emittedScoped = await emitirParaUsuariosQuePodemVerConversa(
           io,
           company_id,
           convIdForEmit,
           'atualizar_conversa',
-          atualizarPayload
+          { id: convIdForEmit }
         )
-        if (!emittedScoped) io.to(`conversa_${convIdForEmit}`).emit('atualizar_conversa', atualizarPayload)
+        if (!emittedScoped) io.to(`conversa_${convIdForEmit}`).emit('atualizar_conversa', { id: convIdForEmit })
       }
       // conversa_atualizada: priorizar nome do sync (name) sobre cache; fallback nome_contato_cache
       let modoSimplesRecalc = null
@@ -2696,7 +2676,7 @@ exports.receberZapi = async (req, res) => {
         io.to(`conversa_${convIdForEmit}`).emit('conversa_atualizada', convPayload)
         if (depId != null) {
           // Não emitir atualizar_conversa em reconciliação (fromMe) — evita refetch que causa bug visual
-          if (mensagemFoiInseridaPeloWebhook) io.to(`departamento_${depId}`).emit('atualizar_conversa', { id: convIdForEmit, motivo: 'nova_mensagem' })
+          if (mensagemFoiInseridaPeloWebhook) io.to(`departamento_${depId}`).emit('atualizar_conversa', { id: convIdForEmit })
           io.to(`departamento_${depId}`).emit('conversa_atualizada', convPayload)
         }
       }
@@ -2775,7 +2755,7 @@ exports.receberZapi = async (req, res) => {
             : (cacheConv.nome_contato_cache ?? convRow?.nome_contato_cache ?? getDisplayName(data) ?? null)
           const fotoParaEmit = cacheConv.foto_perfil_contato_cache ?? convRow?.foto_perfil_contato_cache ?? data?.foto_perfil ?? null
           if (data && io && (nomeParaEmit || fotoParaEmit)) {
-            logDebug('✅ Contato sincronizado Z-API:', telefoneParaLog(syncPhone), nomeParaLog(nomeParaEmit))
+            console.log('✅ Contato sincronizado Z-API:', syncPhone?.slice(-6), nomeParaEmit || '(sem nome)')
             io.to(`empresa_${company_id}`).emit('contato_atualizado', {
               conversa_id: convId,
               contato_nome: nomeParaEmit ? String(nomeParaEmit).trim() : null,
@@ -2784,7 +2764,7 @@ exports.receberZapi = async (req, res) => {
             })
           }
         } catch (e) {
-          console.error('❌ Erro Z-API ao sincronizar contato:', telefoneParaLog(syncPhone), e?.message || e)
+          console.error('❌ Erro Z-API ao sincronizar contato:', syncPhone?.slice(-6), e?.message || e)
         }
       }).catch(() => {})
     }

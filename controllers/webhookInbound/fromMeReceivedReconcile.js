@@ -20,10 +20,9 @@ const {
 const { applyWhatsappInstanceFilterOrLegacy, isRemoteMediaUrl } = require('./whatsappIdLookup')
 const { normalizeRawAckStatus, statusRank } = require('../../helpers/messageStatusHelper')
 const { extrairNomePrefixoTexto } = require('../../helpers/mensagemAtendenteNomeHelper')
-const { textoParaLog } = require('../../helpers/redactLogPII')
 
 const WEBHOOK_MSG_SELECT = 'id, conversa_id, company_id, whatsapp_instance_id, whatsapp_id, texto, url, tipo, direcao, criado_em, status, autor_usuario_id, reply_meta, nome_arquivo, contact_meta, location_meta, remetente_nome, remetente_telefone'
-const { whatsappDebugAtivo } = require('../../helpers/whatsappDebug')
+const WHATSAPP_DEBUG = String(process.env.WHATSAPP_DEBUG || '').toLowerCase() === 'true'
 
 /**
  * Conversas da MESMA empresa que são o mesmo contato da `conversa_id` — ela própria, as do mesmo
@@ -166,19 +165,19 @@ async function reconcileFromMeInReceived(supabaseClient, ctx) {
       if (irmas.length) {
         const { data: fallbackCandidates } = await buildQuery(false, irmas)
         cand = findCand(fallbackCandidates)
-        if (cand && whatsappDebugAtivo()) {
+        if (cand && WHATSAPP_DEBUG) {
           console.log('[Z-API] fromMe reconcile fallback: encontrado fora da conversa', {
             cand_conversa: cand.conversa_id, webhook_conversa: conversa_id
           })
         }
-      } else if (whatsappDebugAtivo()) {
+      } else if (WHATSAPP_DEBUG) {
         console.log('[Z-API] fromMe reconcile: Busca 2 ignorada (nenhuma conversa irmã do mesmo contato)')
       }
     }
 
-    if (!cand && whatsappDebugAtivo()) {
+    if (!cand && WHATSAPP_DEBUG) {
       console.warn('[Z-API] fromMe reconcile: nenhum candidato encontrado', {
-        conversa_id, texto: textoParaLog(texto), fromIso, toIso
+        conversa_id, texto: String(texto || '').slice(0, 30), fromIso, toIso
       })
     }
 

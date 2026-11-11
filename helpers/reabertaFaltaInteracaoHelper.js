@@ -21,46 +21,22 @@ function truthyConfig(value) {
   return s === 'true' || s === '1' || s === 'on' || s === 'ativo'
 }
 
-/**
- * Cache por `company_id` de "alerta sem resposta ligado?" (doc 41 §7). GET /chats lia
- * `ia_config.config` inteiro a cada página só para esse booleano. Quem grava a config
- * (`saveAlertaSemRespostaConfig`, `iaController.putConfig`, `chatbotAutoConfigService`) invalida.
- */
-const _cacheAlertaAtivo = require('./shortTtlCache').create({
-  name: 'alertaSemRespostaAtivo',
-  ttlMs: Number(process.env.ALERTA_SEM_RESPOSTA_CACHE_TTL_MS || 30_000),
-  max: 500,
-})
-
-async function lerAlertaSemRespostaAtivoDoBanco(cid) {
-  const { data, error } = await supabase
-    .from('ia_config')
-    .select('config')
-    .eq('company_id', cid)
-    .maybeSingle()
-  // Lança para a falha NÃO ficar cacheada; o chamador devolve false como sempre devolveu.
-  if (error) throw error
-  const cfg = data?.config || {}
-  const alerta = cfg.alerta_sem_resposta && typeof cfg.alerta_sem_resposta === 'object'
-    ? cfg.alerta_sem_resposta
-    : {}
-  return truthyConfig(alerta.alerta_sem_resposta_ativo) || truthyConfig(alerta.ativo)
-}
-
 async function isAlertaSemRespostaAtivo(company_id) {
-  const cid = Number(company_id)
-  if (!Number.isFinite(cid) || cid <= 0) return false
   try {
-    return await _cacheAlertaAtivo.wrap(cid, '', () => lerAlertaSemRespostaAtivoDoBanco(cid))
+    const { data, error } = await supabase
+      .from('ia_config')
+      .select('config')
+      .eq('company_id', Number(company_id))
+      .maybeSingle()
+    if (error) return false
+    const cfg = data?.config || {}
+    const alerta = cfg.alerta_sem_resposta && typeof cfg.alerta_sem_resposta === 'object'
+      ? cfg.alerta_sem_resposta
+      : {}
+    return truthyConfig(alerta.alerta_sem_resposta_ativo) || truthyConfig(alerta.ativo)
   } catch (_) {
     return false
   }
-}
-
-/** Invalida o booleano cacheado da empresa (sem argumento: todas). */
-function invalidateAlertaSemRespostaCache(company_id) {
-  if (company_id == null) { _cacheAlertaAtivo.clear(); return }
-  _cacheAlertaAtivo.invalidate(company_id)
 }
 
 async function markReabertaFaltaInteracao(
@@ -247,6 +223,4 @@ module.exports = {
   enrichConversasReabertaFaltaInteracao,
   isCandidataReabertaFaltaInteracao,
   isAlertaSemRespostaAtivo,
-  invalidateAlertaSemRespostaCache,
-  _alertaSemRespostaCache: _cacheAlertaAtivo,
 }

@@ -8,8 +8,8 @@ const { normalizePhoneBR, normalizeGroupIdForStorage } = require('../../helpers/
 const { parseVcardForContact } = require('../../helpers/vcardHelper')
 const { resolvePeerPhone } = require('../../helpers/conversationKeyHelper')
 const { inspectInboundOrigin } = require('./chatbotInboundGuard')
-const { whatsappDebugAtivo } = require('../../helpers/whatsappDebug')
-const { telefoneParaLog } = require('../../helpers/redactLogPII')
+
+const WHATSAPP_DEBUG = String(process.env.WHATSAPP_DEBUG || '').toLowerCase() === 'true'
 
 /** Detecta se o payload é de um grupo (remoteJid @g.us, isGroup ou tipo grupo). */
 function isGroupPayload(payload) {
@@ -186,12 +186,9 @@ function resolveConversationKeyFromZapi(payload) {
     ''
 
   if (!myDigits) {
-    // Aviso diagnóstico: connectedPhone ausente é inofensivo (myTail = '' → isMyNumber sempre false).
-    // Só com WHATSAPP_DEBUG (doc 29 §3 item 15): numa instância que nunca manda connectedPhone
-    // isto era um warn por MENSAGEM, com 8 dígitos do telefone do cliente.
-    if (whatsappDebugAtivo()) {
-      console.warn('[Z-API] resolveKey: connectedPhone ausente no payload — verifique a versão/configuração da instância Z-API. phone:', payload.phone ? telefoneParaLog(payload.phone) : '(vazio)')
-    }
+    // Aviso diagnóstico: connectedPhone ausente é inofensivo (myTail = '' → isMyNumber sempre false),
+    // mas registrar ajuda a identificar configurações da Z-API que não enviam connectedPhone.
+    console.warn('[Z-API] resolveKey: connectedPhone ausente no payload — verifique a versão/configuração da instância Z-API. phone:', clean(payload.phone).slice(-8) || '(vazio)')
   }
   const myTail = myDigits ? tail11(myDigits) : ''
   const isMyNumber = (d) => myTail && d && tail11(d) === myTail
@@ -221,8 +218,8 @@ function resolveConversationKeyFromZapi(payload) {
   if (fromMe) {
     const { peerPhone, source } = resolvePeerPhone(payload)
     if (peerPhone) {
-      if (whatsappDebugAtivo()) {
-        console.log('[Z-API] resolveKey fromMe:', { peerPhone: telefoneParaLog(peerPhone), source })
+      if (WHATSAPP_DEBUG) {
+        console.log('[Z-API] resolveKey fromMe:', { peerPhone: peerPhone.slice(-6), source })
       }
       return { key: peerPhone, isGroup: false, participantPhone: '', debugReason: `fromMe ${source}` }
     }

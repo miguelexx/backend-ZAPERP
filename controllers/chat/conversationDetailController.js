@@ -57,18 +57,9 @@ exports.detalharChat = async (req, res) => {
 
     const messageHistoryPagination = parseMessageHistoryPagination(req.query)
     const { limit, cursor, cursor_id } = messageHistoryPagination
-    // Modo leve (`?lista=1`): é o refetch do CARD pelo socket (`atualizar_conversa` /
-    // `addChatIfAuthorized`), não a abertura da thread. Devolve a linha da conversa + só a última
-    // mensagem (preview) e NÃO tem efeito colateral: não marca como lida (quem está com a thread
-    // aberta marca pelo socket `marcar_conversa_lida`), não injeta movimentações internas, não
-    // enriquece citações nem dispara o sync do contato em background. Antes, cada mensagem recebida
-    // fazia todo usuário visível baixar o histórico E zerar o próprio contador de não lidas no
-    // servidor sem ter olhado a conversa. As checagens de permissão (403) são exatamente as mesmas.
-    const listaRaw = String(req.query?.lista ?? '').trim().toLowerCase()
-    const modoLista = listaRaw === '1' || listaRaw === 'true'
     // limit+1 basta para has_more: splitMessageHistoryPage corta em `limit` ANTES dos filtros
     // de ocultas/movimentação, então buffer extra era buscado (com todas as colunas) e descartado.
-    const messageHistoryFetchLimit = modoLista ? 1 : limit + 1
+    const messageHistoryFetchLimit = limit + 1
 
     // conversa (com cliente, atendente, departamento/setor; tipo, nome_grupo, fotos; nome_contato_cache para header quando cliente ainda não tem nome)
     const { data: conversa, error: errConv } = await supabase
@@ -265,19 +256,13 @@ exports.detalharChat = async (req, res) => {
     // O cursor segue as linhas SQL, inclusive as ocultadas da UI. Filtrar antes
     // de paginar pode declarar fim do histórico com mensagens antigas restantes.
     const messageHistoryPage = splitMessageHistoryPage(mensagens, limit)
-    // Modo lista: NÃO filtra a movimentação legada — busca 1 linha só para "tem mensagem?" e o
-    // embed do GET /chats também não filtra; filtrar aqui faria o card divergir da lista.
-    mensagens = modoLista
-      ? messageHistoryPage.rows
-      : messageHistoryPage.rows.filter((m) => !isMensagemLegadaMovimentacaoInterna(m))
+    mensagens = messageHistoryPage.rows.filter((m) => !isMensagemLegadaMovimentacaoInterna(m))
     const oldestDbRow = messageHistoryPage.cursor_row
     const hasMoreFromDb = messageHistoryPage.has_more
 
     let leituraConfirmada = false
     // ✅ "Apagar pra mim" + marcar como lida em paralelo (reduz latência percebida ao abrir o chat)
-    // Modo leve: nem uma nem outra — o card segue a mesma regra do GET /chats (que também não
-    // considera ocultas no "tem mensagem?") e a leitura só pertence a quem abriu a thread.
-    if (!modoLista) try {
+    try {
       const ocultasQuery = supabase
         .from('mensagens_ocultas')
         .select('mensagem_id')
@@ -378,7 +363,7 @@ exports.detalharChat = async (req, res) => {
     // "X transferiu para Y" (com a observação da transferência) quase nunca apareciam no histórico
     // de admin/supervisor. Cópia antes de inverter mantém `mensagens` em ordem decrescente.
     let mensagensFormatadas = [...(mensagens || [])].reverse()
-    if (!modoLista && perfilPodeVerMovimentacaoInterna(perfil)) {
+    if (perfilPodeVerMovimentacaoInterna(perfil)) {
       const movimentosQuery = {
         company_id,
         conversa_id: id,
@@ -414,7 +399,7 @@ exports.detalharChat = async (req, res) => {
     mensagensFormatadas = enrichedMensagens
     // Resolve o trecho real da mensagem citada (reply_meta) quando ficou gravado como "Mensagem"/vazio
     // no webhook (corrida com o ACK / id que só casa depois). Best-effort, nunca derruba o detalhe.
-    if (!modoLista) try {
+    try {
       mensagensFormatadas = await enrichReplyMetaSnippets(
         supabase,
         { company_id, conversa_id: conversaId, whatsapp_instance_id: conversa.whatsapp_instance_id ?? null },
@@ -478,8 +463,7 @@ exports.detalharChat = async (req, res) => {
     }
 
     // Background: re-sincroniza foto e nome do contato/grupo com provider (UltraMsg/Z-API)
-    // (não no modo leve: um refetch de card por mensagem recebida não é "abriu a conversa")
-    if (io && !modoLista) {
+    if (io) {
       setImmediate(() => {
         if (isGroup) {
           const { syncConversationGroupOnJoin } = require('../../services/ultramsgGroupsSyncService')

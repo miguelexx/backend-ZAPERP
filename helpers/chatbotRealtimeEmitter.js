@@ -5,15 +5,6 @@
 
 const { normalizarTimestampSemFusoAmbiguoParaApi } = require('./timestampApiCompat')
 
-/**
- * Lazy: o gateway de realtime puxa o serviço de visibilidade (e este helper é carregado
- * cedo pelo webhook). Resolver no momento do emit evita ciclo de require no boot e mantém
- * os testes que fazem `jest.doMock` do gateway funcionando.
- */
-function _emitirParaUsuariosQuePodemVerConversa() {
-  return require('../services/chat/realtime/chatRealtimeGateway').emitirParaUsuariosQuePodemVerConversa
-}
-
 function canonicalMsgStatus(row) {
   const raw = (row?.status_mensagem ?? row?.status ?? '').toString().toLowerCase()
   if (raw === 'enviada' || raw === 'enviado') return 'sent'
@@ -60,26 +51,10 @@ async function emitBotMensagemRealtime({ io, supabase, company_id, conversa_id, 
   }
 
   const depId = convRow?.departamento_id != null ? Number(convRow.departamento_id) : null
-  // Rooms amplas (empresa_/departamento_) só como FALLBACK, quando não dá para resolver quem
-  // pode ver a conversa. Antes a resposta do bot ia para a empresa inteira: cada usuário que
-  // NÃO tinha a conversa na lista (a maioria, em empresa com setores) fazia `GET /chats/:id`
-  // e levava 403 — uma tempestade de detalhes por mensagem de triagem (doc 40 §3.1).
   const rooms = [`conversa_${cid}`, `empresa_${company_id}`]
   if (depId != null) rooms.push(`departamento_${depId}`)
 
-  const emitirEscopado = async (eventName, payload) => {
-    try {
-      const ok = await _emitirParaUsuariosQuePodemVerConversa()(io, company_id, cid, eventName, payload)
-      if (ok) return true
-    } catch (e) {
-      console.warn('[chatbotRealtimeEmitter] emit escopado:', e?.message || e)
-    }
-    return false
-  }
-
-  if (!(await emitirEscopado('nova_mensagem', emitPayload))) {
-    io.to(rooms).emit('nova_mensagem', emitPayload)
-  }
+  io.to(rooms).emit('nova_mensagem', emitPayload)
 
   const isGroup = String(convRow?.tipo || '').toLowerCase() === 'grupo' || String(convRow?.telefone || '').includes('@g.us')
   const contatoNome = convRow?.nome_contato_cache ? String(convRow.nome_contato_cache).trim() : null
@@ -108,20 +83,13 @@ async function emitBotMensagemRealtime({ io, supabase, company_id, conversa_id, 
     reordenar_suave: true,
   }
 
-  // `motivo: 'nova_mensagem'`: o `conversa_atualizada` abaixo já leva o card completo; o frontend
-  // que conhece o flag não refaz `GET /chats/:id` para conversa que já está na lista.
-  const atualizarPayload = { id: cid, motivo: 'nova_mensagem' }
-  if (!(await emitirEscopado('atualizar_conversa', atualizarPayload))) {
-    // Emits únicos por evento (mesmas rooms de antes): todo socket de departamento_/conversa_
-    // também está em empresa_, então emits separados entregavam o mesmo evento 2-3x por
-    // mensagem do bot. Socket.IO deduplica sockets num emit multi-room.
-    const atualizarRooms = [`empresa_${company_id}`]
-    if (depId != null) atualizarRooms.push(`departamento_${depId}`)
-    io.to(atualizarRooms).emit('atualizar_conversa', atualizarPayload)
-  }
-  if (!(await emitirEscopado('conversa_atualizada', convPayload))) {
-    io.to(rooms).emit('conversa_atualizada', convPayload)
-  }
+  // Emits únicos por evento (mesmas rooms de antes): todo socket de departamento_/conversa_
+  // também está em empresa_, então emits separados entregavam o mesmo evento 2-3x por
+  // mensagem do bot. Socket.IO deduplica sockets num emit multi-room.
+  const atualizarRooms = [`empresa_${company_id}`]
+  if (depId != null) atualizarRooms.push(`departamento_${depId}`)
+  io.to(atualizarRooms).emit('atualizar_conversa', { id: cid })
+  io.to(rooms).emit('conversa_atualizada', convPayload)
 }
 
 /**

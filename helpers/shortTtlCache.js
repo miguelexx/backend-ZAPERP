@@ -83,16 +83,11 @@ function create({ name, ttlMs = DEFAULT_TTL_MS, max = DEFAULT_MAX } = {}) {
     store.set(k, { promise, expiresAt: agora + ttl })
     try {
       const value = await promise
-      // Só grava se a entrada ainda é a NOSSA. Se `invalidate()` rodou enquanto o loader estava
-      // em voo (admin salvou a configuração 20 ms depois de um GET começar), gravar aqui
-      // ressuscitaria o valor ANTIGO por um TTL inteiro — a invalidação seria perdida.
-      if (store.get(k)?.promise === promise) {
-        store.set(k, { value, promise: null, expiresAt: Date.now() + ttl })
-      }
+      store.set(k, { value, promise: null, expiresAt: Date.now() + ttl })
       return value
     } catch (e) {
-      // Falha não é cacheada (e só apaga se ainda for a nossa entrada).
-      if (store.get(k)?.promise === promise) store.delete(k)
+      // Falha não é cacheada.
+      store.delete(k)
       throw e
     }
   }

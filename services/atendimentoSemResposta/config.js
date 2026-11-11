@@ -1,6 +1,5 @@
 const supabase = require('../../config/supabase')
 const { DEFAULT_ALERTA_SEM_RESPOSTA } = require('./constants')
-const { invalidateAlertaSemRespostaCache } = require('../../helpers/reabertaFaltaInteracaoHelper')
 const {
   normalizeHorarioTime,
   normalizeDiasSemanaDesativados,
@@ -245,8 +244,6 @@ async function saveAlertaSemRespostaConfig(company_id, patch) {
       { onConflict: 'company_id' }
     )
   if (error) return { ok: false, error: error.message }
-  // `isAlertaSemRespostaAtivo` (GET /chats) é cacheado por empresa — reler na próxima página.
-  invalidateAlertaSemRespostaCache(company_id)
   return { ok: true, config: merged }
 }
 

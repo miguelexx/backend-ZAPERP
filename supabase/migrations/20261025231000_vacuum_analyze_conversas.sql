@@ -1,6 +1,3 @@
--- ⚠️ CONFIRMADO EM 11/11/2026: NÃO roda no SQL Editor nem colado sozinho (25001 sempre).
--- No editor use ANALYZE + autovacuum agressivo — ver docs/SQL-RODAR-NO-SUPABASE-2026-11-11.sql, bloco B.
--- Este arquivo só serve via psql/CLI.
 -- =====================================================================================
 -- VACUUM (ANALYZE) em `conversas`
 --

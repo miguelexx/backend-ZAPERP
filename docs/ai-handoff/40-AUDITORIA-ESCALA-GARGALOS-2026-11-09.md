@@ -146,8 +146,6 @@ Nenhuma migration, nenhum contrato de Socket.IO, nenhuma rota, nenhum formato de
 
 ### 3.1 `atualizar_conversa` para `empresa_` (doc 29 §3.1) — quase resolvido
 
-> **CORRIGIDO 10/11/2026 (não deployado) — ver [41](41-REFETCH-POR-MENSAGEM-MODO-LEVE-2026-11-10.md).** O inbound e o bot marcam o sinal com `motivo: 'nova_mensagem'`; o frontend não refaz `GET /chats/:id` para conversa já listada; o bot foi escopado; os refetches de card usam `?lista=1` (sem marcar lida). O texto abaixo fica como histórico.
-
 Já escopado: `chatRealtimeGateway.js` (via `emitirEventoConversaVisivel`) e o inbound
 (`webhookZapiController.js:2591`, via `emitirParaUsuariosQuePodemVerConversa`).
 
@@ -174,8 +172,6 @@ remover o emit redundante: zero `GET /chats/:id` na aba do atendente sem acesso 
 lista; a aba do admin continua atualizando o card pelo `conversa_atualizada`.
 
 ### 3.2 `encerrarChat` sem guarda (doc 29 §3.3) — CONFIRMADO, é regra de negócio
-
-> **CORRIGIDO 11/11/2026 (não deployado), opção (a) decidida pelo Miguel.** `encerrarChat` tem guarda igual à do `reabrirChat` (UPDATE condicionado ao status visto na checagem; `.is(null)` quando não há status). Conversa já fechada → **200** `{ ok, conversa, ja_encerrada: true }` sem registrar atendimento nem reenviar a mensagem de finalização; status que mudou para outro estado aberto no meio-tempo → **409** `CONVERSA_MUDOU_DE_ESTADO` (o frontend reverte o otimista). Teste: `tests/encerrarChatIdempotente.test.js`. O texto abaixo fica como histórico.
 
 `attendanceController.js:103` grava `status_atendimento: 'fechada'` **sem** filtrar o status atual.
 Duplo clique = 2 UPDATEs bem-sucedidos → 2 `registrarAtendimento('encerrou')` → **2 mensagens de

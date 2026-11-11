@@ -63,29 +63,6 @@ async function limitesDaInstancia(companyId, instId) {
   return limites
 }
 
-/**
- * O número está conectado? Enquanto não estiver, o worker NÃO toca na fila.
- *
- * Em 11/11/2026 o canal da empresa 4 caiu para `QR` no meio de uma leva de adições. O worker
- * continuou chamando o provedor: cada chamada gastava uma das 5 tentativas do item e voltava
- * vazia, e o item terminava marcado como falha por um motivo que não era dele. Pior: tentativa
- * de adicionar em grupo é a operação de maior risco anti-spam justamente quando a sessão está
- * instável. Com a guarda, o item é adiado e espera o número voltar.
- *
- * `null`/erro = não deu para saber → deixa passar (indisponibilidade de leitura não pode
- * paralisar a fila de quem está saudável).
- */
-async function instanciaConectada(companyId, instId) {
-  try {
-    const r = await getWhatsappInstanceById(companyId, instId, { includeCredentials: false, requireActive: false })
-    const status = String(r?.instance?.status || '').trim().toLowerCase()
-    if (!status) return true
-    return status === 'connected' || status === 'authenticated' || status === 'auth'
-  } catch {
-    return true
-  }
-}
-
 /** Conta adições concluídas da instância numa janela (segundos atrás → agora). */
 async function contarConcluidosJanela(companyId, instId, segundos) {
   const desde = new Date(Date.now() - segundos * 1000).toISOString()
@@ -242,14 +219,6 @@ async function processarItem(item) {
   }
 
   try {
-    // Número fora do ar: adia e espera voltar. Insistir aqui queima as tentativas do item e
-    // bate no WhatsApp justamente quando a sessão está instável (ver instanciaConectada).
-    if (!(await instanciaConectada(companyId, instId))) {
-      console.warn(`[comunidadeWorker] instância ${instId} não está conectada — fila adiada`)
-      await adiarItem(item, new Date(Date.now() + 5 * 60 * 1000).toISOString())
-      return
-    }
-
     const limites = await limitesDaInstancia(companyId, instId)
     const gate = await gateDeRitmo(companyId, instId, limites)
     if (!gate.ok) {
@@ -290,31 +259,13 @@ async function processarItem(item) {
       return
     }
     // JID completo quando verificado: número cru passa por `toWhapiRecipient`, que REINSERE o
-    // Endereços a tentar, SEMPRE como JID completo: número cru passa por `toWhapiRecipient`,
-    // que REINSERE o 9º dígito e desfaz a resolução. Quando `checkPhones` não está disponível
-    // (o canal da empresa 4 devolve 401 nesse endpoint), são as duas formas do 9º dígito —
-    // mesma política de `runOnChatCandidates` nas ações de chat.
-    const candidatos = (endereco.candidatos || []).length
-      ? endereco.candidatos
-      : [endereco.chatId || endereco.jid]
+    // 9º dígito e desfaz a resolução (ver comoChatId em enderecoWhatsappService).
+    const jidAlvo = endereco.chatId || endereco.jid
 
     // reserva o próximo horário permitido (espaçamento conservador) já antes da chamada
     proximoPermitidoPorInstancia.set(instId, Date.now() + intervaloComJitterMs(limites))
 
-    let result = null
-    let jidAlvo = candidatos[0]
-    for (let i = 0; i < candidatos.length; i += 1) {
-      jidAlvo = candidatos[i]
-      result = await metodo.call(p, item.comunidade_id, [jidAlvo], providerOpts)
-      // Só insiste no próximo endereço quando a chamada deu certo e o WhatsApp recusou ESTE
-      // endereço: erro de transporte/rate limit segue o tratamento de sempre, logo abaixo.
-      if (!result?.ok) break
-      if (operacao !== 'add') break
-      if (avaliarResultadoAdd(jidAlvo, result.data) !== 'failed') break
-      if (i < candidatos.length - 1) {
-        console.log(`[comunidadeWorker] ${jidAlvo} recusado, tentando o outro endereço do 9º dígito`)
-      }
-    }
+    const result = await metodo.call(p, item.comunidade_id, [jidAlvo], providerOpts)
 
     if (result?.ok) {
       let resultado = 'processed'

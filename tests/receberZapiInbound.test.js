@@ -115,10 +115,6 @@ describe('receberZapi — miolo inbound (caracterização)', () => {
     const eventos = emitirParaUsuariosQuePodemVerConversa.mock.calls.map((c) => c[3])
     expect(eventos).toContain('nova_mensagem')
     expect(eventos).toContain('atualizar_conversa')
-    // `motivo: 'nova_mensagem'`: o frontend novo não refaz GET /chats/:id para conversa já listada
-    // (o conversa_atualizada seguinte já leva o card). Sem o flag voltaria a tempestade de refetch.
-    const atualizar = emitirParaUsuariosQuePodemVerConversa.mock.calls.find((c) => c[3] === 'atualizar_conversa')
-    expect(atualizar[4]).toEqual({ id: 10, motivo: 'nova_mensagem' })
     // Não é reconciliação de eco: o caminho fromMe/crm-* não foi tocado.
     expect(tryReconcileFromMeByCrmReferenceId).not.toHaveBeenCalled()
   })

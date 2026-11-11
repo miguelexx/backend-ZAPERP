@@ -14,7 +14,6 @@ const { getDisplayName, pickConversationDisplayName } = require('../../helpers/c
 const { empresaModoSimplesAtivo } = require('../../helpers/empresaModoSimplesFlag')
 const { resolveGrupoIdsComUnreadParaUsuario, applyAguardandoAtendenteModoSimplesQuery, rowAguardandoAtendenteModoSimples } = require('../../helpers/modoSimplesGrupoUnread')
 const { usuarioPertenceSetorFinanceiro } = require('../../helpers/financeiroSetorHelper')
-const { listarColaboradoresEncaminhar } = require('../../helpers/colaboradoresEncaminharHelper')
 const { buildClienteSearchOr, buildTelefoneSearchOr, buildPhoneSearchTerms, chatIdentityMatchesSearch, gerarVariantesOrdinais } = require('../../helpers/chatSearchHelper')
 const { buscarConversaIdsPorNomesVinculados, buscarClienteIdsPorNomeVinculado, anexarVinculosEmBusca } = require('../../helpers/clienteNomesVinculados')
 const { getGrupoIdsPorDepartamentos, getGrupoIdsSemDepartamento, getGrupoIdsFixadosPeloUsuario, pushNonGroupVisibilityParts, pushAtendenteFilaLivreVisibilityParts, pushAllowedGroupIdsPart } = require('../../helpers/departamentoGruposHelper')
@@ -115,9 +114,22 @@ exports.listarConversas = async (req, res) => {
       })
     }
 
-    // `usuarios` ativos da empresa, cacheados por company_id (helpers/colaboradoresEncaminharHelper):
-    // a lista completa fica no cache e o `neq(id, user_id)` original é aplicado em memória.
-    const loadColaboradoresEncaminhar = () => listarColaboradoresEncaminhar(company_id, user_id)
+    async function loadColaboradoresEncaminhar() {
+      const { data, error } = await supabase
+        .from('usuarios')
+        .select('id, nome, email, perfil')
+        .eq('company_id', company_id)
+        .eq('ativo', true)
+        .neq('id', user_id)
+        .order('nome', { ascending: true })
+      if (error) return []
+      return (data || []).map((u) => ({
+        usuario_id: Number(u.id),
+        nome: u.nome ?? null,
+        email: u.email ?? null,
+        perfil: u.perfil ?? null,
+      }))
+    }
 
     // Calculado antes do Promise.all pois depende apenas de valores síncronos já disponíveis
     const incluirGruposSemDepartamentoNoTodos = deveIncluirGruposSemDepartamentoNoFiltroTodos({
