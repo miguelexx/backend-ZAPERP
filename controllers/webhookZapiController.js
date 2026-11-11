@@ -2590,15 +2590,22 @@ exports.receberZapi = async (req, res) => {
       // NÃO emitir atualizar_conversa para mensagens enviadas por nós (fromMe)
       // — evita refetch que causa duplicação visual e flicker. status_mensagem já atualiza os ticks.
       // Só emitir para mensagens recebidas (inseridas pelo webhook)
+      //
+      // `motivo: 'nova_mensagem'` (doc 41): o `conversa_atualizada` logo abaixo já leva o payload
+      // completo do card, então o frontend que conhece o flag NÃO refaz `GET /chats/:id` para uma
+      // conversa que já tem na lista — era 1 detalhe completo (histórico + marcação de leitura +
+      // sync do contato) por usuário visível, por mensagem recebida. Frontend antigo ignora o
+      // campo extra e continua como antes.
       if (!fromMe) {
+        const atualizarPayload = { id: convIdForEmit, motivo: 'nova_mensagem' }
         const emittedScoped = await emitirParaUsuariosQuePodemVerConversa(
           io,
           company_id,
           convIdForEmit,
           'atualizar_conversa',
-          { id: convIdForEmit }
+          atualizarPayload
         )
-        if (!emittedScoped) io.to(`conversa_${convIdForEmit}`).emit('atualizar_conversa', { id: convIdForEmit })
+        if (!emittedScoped) io.to(`conversa_${convIdForEmit}`).emit('atualizar_conversa', atualizarPayload)
       }
       // conversa_atualizada: priorizar nome do sync (name) sobre cache; fallback nome_contato_cache
       let modoSimplesRecalc = null
@@ -2676,7 +2683,7 @@ exports.receberZapi = async (req, res) => {
         io.to(`conversa_${convIdForEmit}`).emit('conversa_atualizada', convPayload)
         if (depId != null) {
           // Não emitir atualizar_conversa em reconciliação (fromMe) — evita refetch que causa bug visual
-          if (mensagemFoiInseridaPeloWebhook) io.to(`departamento_${depId}`).emit('atualizar_conversa', { id: convIdForEmit })
+          if (mensagemFoiInseridaPeloWebhook) io.to(`departamento_${depId}`).emit('atualizar_conversa', { id: convIdForEmit, motivo: 'nova_mensagem' })
           io.to(`departamento_${depId}`).emit('conversa_atualizada', convPayload)
         }
       }

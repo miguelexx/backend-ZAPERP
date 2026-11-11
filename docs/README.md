@@ -92,6 +92,7 @@ docs/
 | **"Mostra enviada mas não foi" — `55` colado em número estrangeiro, `pending` eterno, tique que mente** | `ai-handoff/38-AUDITORIA-ENDERECO-DESTINO-CORROMPIDO.md` |
 | **Contato aparece na busca ("Sem conversa") e dá erro ao abrir — tronco "0" antes do DDD** | `ai-handoff/39-AUDITORIA-CONTATO-NAO-ABRE-CONVERSA.md` |
 | **Gargalos de escala: status que regride, áudio duplicado, ACK na conversa errada, cache/concorrência do inbound e mídia** | `ai-handoff/40-AUDITORIA-ESCALA-GARGALOS-2026-11-09.md` |
+| **"Fica lento quando há fluxo de mensagens" — refetch de detalhe por mensagem recebida, badge que sumia, modo leve `?lista=1`** | `ai-handoff/41-REFETCH-POR-MENSAGEM-MODO-LEVE-2026-11-10.md` |
 | **Contrato da API WM como recebido (openapi.yaml + 5 documentos, não editar)** | `wm/README.md` |
 | Nomes "zapi" no código | `reference/ADR-LEGACY-NAMING.md` |
 | Regras obrigatórias do projeto | `reference/PROJECT_RULES.md` |
