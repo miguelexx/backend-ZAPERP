@@ -1,5 +1,6 @@
 const supabase = require('../config/supabase')
 const { instanciasPermitidasDoUsuario, atendentePodeVerNumero } = require('./chat/access/usuarioWhatsappInstanceAccess')
+const { listUltimaMensagemPorConversa } = require('./chat/read/ultimaMensagemPorConversa')
 
 async function loadWhatsappInstanceMetaMap(companyId, instanceIds) {
   const ids = [...new Set((instanceIds || []).map((id) => Number(id)).filter((id) => Number.isFinite(id) && id > 0))]
@@ -150,50 +151,15 @@ function toListItem(conversa, instanceMeta = {}) {
   }
 }
 
+/**
+ * Última mensagem in/out por conversa — embed lateral `limit 1` por conversa, sem OFFSET
+ * (doc 29 §3 item 10; implementação partilhada com a Supervisão em
+ * `services/chat/read/ultimaMensagemPorConversa.js`). Map<Number(conversa_id), linha>.
+ */
 async function listLastMessagesByConversation(companyId, conversationIds) {
-  const normalizeIds = [...new Set(
-    (conversationIds || []).map((id) => Number(id)).filter((n) => Number.isFinite(n) && n > 0)
-  )]
-  if (!normalizeIds.length) return new Map()
-
-  async function fetchSlice(idsSlice) {
-    const needed = new Set(idsSlice)
-    const map = new Map()
-    let offset = 0
-    for (;;) {
-      const { data, error } = await supabase
-        .from('mensagens')
-        .select('conversa_id, direcao, criado_em')
-        .eq('company_id', companyId)
-        .in('conversa_id', idsSlice)
-        .in('direcao', ['in', 'out'])
-        .not('criado_em', 'is', null)
-        .order('criado_em', { ascending: false, nullsFirst: false })
-        .range(offset, offset + MSG_PAGE - 1)
-      if (error) throw error
-      const rows = data || []
-      for (const msg of rows) {
-        const cid = Number(msg.conversa_id)
-        if (!needed.has(cid)) continue
-        if (!map.has(cid)) map.set(cid, msg)
-      }
-      if (rows.length < MSG_PAGE) break
-      offset += MSG_PAGE
-      if (map.size >= needed.size) break
-    }
-    return map
-  }
-
-  if (normalizeIds.length <= CONV_ID_IN_CHUNK) return fetchSlice(normalizeIds)
-
-  const merged = new Map()
-  for (let i = 0; i < normalizeIds.length; i += CONV_ID_IN_CHUNK) {
-    const part = await fetchSlice(normalizeIds.slice(i, i + CONV_ID_IN_CHUNK))
-    for (const [k, v] of part) {
-      if (!merged.has(k)) merged.set(k, v)
-    }
-  }
-  return merged
+  return listUltimaMensagemPorConversa(companyId, conversationIds, {
+    colunas: 'conversa_id, direcao, criado_em',
+  })
 }
 
 async function listConversasDoAtendente(companyId, usuarioId) {
@@ -254,6 +220,44 @@ async function listTransferenciasRecebidas(companyId, conversaIds, usuarioId) {
   return all
 }
 
+/** Menor `criado_em` entre as transferências do lote — fronteira da janela de data. */
+function transferenciaMaisAntigaIso(conversaIdsSlice, transferMap) {
+  let min = Infinity
+  for (const cid of conversaIdsSlice) {
+    const t = transferMap.get(Number(cid))?.criado_em
+    if (!t) continue
+    const ts = new Date(t).getTime()
+    if (Number.isFinite(ts) && ts < min) min = ts
+  }
+  return Number.isFinite(min) ? new Date(min).toISOString() : null
+}
+
+/**
+ * ÚLTIMA resposta (`out`) do atendente logado em cada conversa que lhe foi transferida.
+ *
+ * Doc 29 §3 item 10: a versão antiga trazia TODAS as mensagens `out` do usuário nessas
+ * conversas, sem janela de data nem teto — e o PostgREST corta em ~1000 linhas em silêncio,
+ * logo um atendente com histórico longo podia ver "transferido para você" voltar numa
+ * conversa já respondida.
+ *
+ * Por que UMA linha por conversa basta: `buildRespostaAposTransferenciaSet` só pergunta
+ * "existe `out` do usuário com criado_em >= transferência?". A última `out` do usuário tem o
+ * maior criado_em, logo "última >= transferência" ⇔ "existe alguma >= transferência".
+ *
+ * Janela de data: nenhuma mensagem anterior à transferência MAIS ANTIGA do lote pode
+ * satisfazer o critério acima (cada conversa exige criado_em >= a SUA transferência, que é
+ * >= a mais antiga). O `gte` só corta o que o classificador ignoraria — mesmo resultado.
+ * (Minhas Pendências não tem "período": conversas `em_atendimento` contam seja a
+ * transferência de hoje ou da semana passada, por isso a fronteira é a transferência e não
+ * o início do dia.)
+ *
+ * Teto: o pai é `.in('id', slice)` com <= CONV_ID_IN_CHUNK ids e o embed devolve <= 1 linha
+ * por conversa, logo o resultado real tem no máximo `slice.length` linhas —
+ * `limit(slice.length)` é o teto exato e nunca trunca.
+ *
+ * Formato de retorno inalterado: linhas planas `{ conversa_id, direcao, criado_em,
+ * autor_usuario_id }` (no máximo uma por conversa).
+ */
 async function listRespostasAtendenteAposTransferencias(companyId, conversaIds, usuarioId, transferMap) {
   const idsComTransfer = [...transferMap.keys()]
   if (!idsComTransfer.length) return []
@@ -261,16 +265,32 @@ async function listRespostasAtendenteAposTransferencias(companyId, conversaIds, 
   const all = []
   for (let i = 0; i < idsComTransfer.length; i += CONV_ID_IN_CHUNK) {
     const slice = idsComTransfer.slice(i, i + CONV_ID_IN_CHUNK)
+    const desde = transferenciaMaisAntigaIso(slice, transferMap)
+    // Sem data válida em nenhuma transferência do lote, o classificador ignora todas
+    // (`if (!transfer?.criado_em) continue`) — não há resposta possível a devolver.
+    if (!desde) continue
+
     const { data, error } = await supabase
-      .from('mensagens')
-      .select('conversa_id, direcao, criado_em, autor_usuario_id')
+      .from('conversas')
+      .select('id, mensagens ( conversa_id, direcao, criado_em, autor_usuario_id )')
       .eq('company_id', companyId)
-      .in('conversa_id', slice)
-      .eq('direcao', 'out')
-      .eq('autor_usuario_id', usuarioId)
-      .not('criado_em', 'is', null)
+      .in('id', slice)
+      .eq('mensagens.company_id', companyId)
+      .eq('mensagens.direcao', 'out')
+      .eq('mensagens.autor_usuario_id', usuarioId)
+      .not('mensagens.criado_em', 'is', null)
+      .gte('mensagens.criado_em', desde)
+      .order('criado_em', { ascending: false, referencedTable: 'mensagens' })
+      .order('id', { ascending: false, referencedTable: 'mensagens' })
+      .limit(1, { referencedTable: 'mensagens' })
+      .limit(slice.length)
     if (error) throw error
-    all.push(...(data || []))
+
+    for (const conversa of data || []) {
+      const ultima = Array.isArray(conversa?.mensagens) ? conversa.mensagens[0] : conversa?.mensagens
+      if (!ultima) continue
+      all.push({ ...ultima, conversa_id: Number(conversa.id) })
+    }
   }
   return all
 }
@@ -379,6 +399,9 @@ module.exports = {
   CATEGORIAS,
   // exportados para testes unitários da classificação
   _test: {
+    listLastMessagesByConversation,
+    listRespostasAtendenteAposTransferencias,
+    transferenciaMaisAntigaIso,
     isAguardandoCliente,
     isConversaElegivelBase,
     buildUltimaTransferenciaRecebidaMap,

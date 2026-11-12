@@ -7,6 +7,7 @@
  */
 
 const { getWhatsappInstanceByProviderInstanceId } = require('../services/whatsappInstanceService')
+const { whatsappDebugAtivo } = require('../helpers/whatsappDebug')
 
 /**
  * Cache TTL curto de resoluções BEM-SUCEDIDAS instanceId→instância (mesmo padrão do
@@ -106,7 +107,10 @@ async function resolveWebhookCompany(req, res, next) {
     const resolved = cachedInstance
       ? { instance: cachedInstance }
       : await getWhatsappInstanceByProviderInstanceId('ultramsg', instanceIdRaw)
-    _logResolveDecision({
+    // Decisão de resolve só com WHATSAPP_DEBUG (doc 29 §3 item 15): era uma linha por webhook
+    // (mensagem E ack). Os desfechos que importam (duplicada, erro de banco, não mapeada)
+    // continuam logados sempre, logo abaixo.
+    if (whatsappDebugAtivo()) _logResolveDecision({
       eventType,
       instance_id_raw: instanceIdRaw,
       from_cache: Boolean(cachedInstance),
@@ -159,8 +163,8 @@ async function resolveWebhookCompany(req, res, next) {
     const provider_instance_id = instance?.instance_id || instanceIdRaw
     const companyIdResolved = company_id != null ? company_id : 'not_mapped'
 
-    // (sem _logSafe aqui: [WEBHOOK_RESOLVE] acima já registra o mesmo resolve com mais
-    // detalhe — eram 2 linhas por webhook no caminho de sucesso)
+    // (sem _logSafe aqui: o resolve bem-sucedido não gera linha sem WHATSAPP_DEBUG —
+    // o [WEBHOOK_RESOLVE] acima cobre o detalhe quando a flag está ligada)
 
     req.webhookContext = {
       company_id,

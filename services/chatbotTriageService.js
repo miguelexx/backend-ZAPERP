@@ -17,6 +17,8 @@ const { isUltramsgNumericQueueId, isRealWhatsAppId } = require('../helpers/whats
 const { mapProviderSendResult } = require('./chat/outbound/providerResultMapper')
 const { REAL_MESSAGE_DIRECOES, isInternalNoteRow } = require('../helpers/internalNote')
 const { resolveTimezone, resolveTimezoneForUf, normalizeUf, DEFAULT_TIMEZONE } = require('../helpers/brazilTimezones')
+const { whatsappDebugAtivo } = require('../helpers/whatsappDebug')
+const { telefoneParaLog, textoParaLog } = require('../helpers/redactLogPII')
 
 /**
  * Corrige mojibake típico: texto UTF-8 foi gravado/lido como Latin-1 (ex.: "OpÃ§Ã£o" → "Opção").
@@ -1423,14 +1425,18 @@ async function processIncomingMessage(ctx) {
     conversaReabertaAposFinalizacao = false,
   } = ctx
   
-  console.log('[chatbotTriage] 🤖 INÍCIO DO PROCESSAMENTO', {
-    company_id,
-    conversa_id,
-    telefone: String(telefone || '').slice(-8),
-    texto: String(ctx.texto || '').slice(0, 50),
-    conversaReabertaAposFinalizacao,
-    timestamp: new Date().toISOString()
-  })
+  // Só com WHATSAPP_DEBUG (doc 29 §3 item 15): corria em TODA mensagem elegível ao bot, com
+  // 8 dígitos do telefone e 50 caracteres do texto do cliente. Telefone mascarado; texto só tamanho.
+  if (whatsappDebugAtivo()) {
+    console.log('[chatbotTriage] 🤖 INÍCIO DO PROCESSAMENTO', {
+      company_id,
+      conversa_id,
+      telefone: telefoneParaLog(telefone),
+      texto: textoParaLog(ctx.texto),
+      conversaReabertaAposFinalizacao,
+      timestamp: new Date().toISOString()
+    })
+  }
   
   if (!company_id || !conversa_id || !telefone || !sendMessage) {
     console.log('[chatbotTriage] ❌ skip: falta company_id, conversa_id, telefone ou sendMessage')
