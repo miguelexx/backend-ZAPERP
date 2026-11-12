@@ -19,13 +19,24 @@
 const mockEstado = { porTabela: {}, total: 0, falharConversas: false }
 
 jest.mock('../config/supabase', () => {
-  const fabricarBuilder = () => {
+  const fabricarBuilder = (tabela) => {
     const resultado = { data: [], count: 0, error: null }
     const builder = new Proxy(
       {},
       {
         get(_alvo, prop) {
           if (prop === 'then') return (resolve) => resolve(resultado)
+          if (prop === 'select') {
+            return (...args) => {
+              // A sonda do backfill de tem_mensagem (`mensagens!inner`, 1× por processo) não é
+              // uma count: não entra na régua de "quantas queries uma chamada fria faz".
+              if (!String(args[0] || '').includes('mensagens!inner')) {
+                mockEstado.porTabela[tabela] = (mockEstado.porTabela[tabela] || 0) + 1
+                mockEstado.total++
+              }
+              return builder
+            }
+          }
           if (prop === 'maybeSingle' || prop === 'single') {
             return () => ({ then: (resolve) => resolve({ data: null, error: null }) })
           }
@@ -37,14 +48,12 @@ jest.mock('../config/supabase', () => {
   }
   return {
     from: (tabela) => {
-      mockEstado.porTabela[tabela] = (mockEstado.porTabela[tabela] || 0) + 1
-      mockEstado.total++
       // LANÇA de verdade (devolver `{ error }` não basta: o caminho de falha tem de rejeitar
       // a promessa inteira para provar que a entrada em voo sai do mapa).
       if (tabela === 'conversas' && mockEstado.falharConversas) {
         throw new Error('falha simulada do banco')
       }
-      return fabricarBuilder()
+      return fabricarBuilder(tabela)
     },
     rpc: () => ({ then: (resolve) => resolve({ data: [], error: null }) }),
   }

@@ -16,6 +16,12 @@ const { instanciasPermitidasDoUsuario } = require('./chat/access/usuarioWhatsapp
 const { aplicarFiltroNumerosPermitidos } = require('./chat/access/usuarioWhatsappInstanceAccessRules')
 const { usuarioPertenceSetorFinanceiro } = require('../helpers/financeiroSetorHelper')
 const {
+  temMensagemDisponivel,
+  temMensagemPronta,
+  erroDeTemMensagemAusente,
+  desligarTemMensagem,
+} = require('../helpers/conversasTemMensagemColumn')
+const {
   buildTelefoneSearchOr,
   buildPhoneSearchTerms,
   escapeIlikePattern,
@@ -650,7 +656,98 @@ function countNeedsPostListRules(overrides = {}, ctx = {}) {
   )
 }
 
+/**
+ * Predicado SQL (sintaxe `or=` do PostgREST) EQUIVALENTE a `rowVisibleInPostFilteredList` para
+ * os três overrides que exigem regra pós-lista. Só é possível porque `conversas.tem_mensagem`
+ * (migration 20261111135500) traz para a própria tabela o único dado que antes vinha do embed
+ * `mensagens(id)`. Mantenha as duas funções espelhadas: a JS continua sendo a regra de
+ * referência (e o fallback enquanto a coluna não existe).
+ *
+ * Diferenças assumidas em relação à JS (iguais às que `applyChatListSqlFilters` já assume):
+ * `tipo.eq.grupo` e `status_atendimento.eq.x` são comparações exatas — a JS normaliza com
+ * trim/lowercase, mas o código grava esses valores sempre em minúsculas.
+ *
+ * @returns {string|null} string para `.or(...)`, ou null se o override não tem regra pós-lista.
+ */
+function buildPostListRulesSqlOr(ctx, overrides = {}) {
+  const NUNCA = 'id.in.(0)' // predicado falso (mesmo idioma de `q.in('id', [0])`)
+  const NAO_GRUPO = 'or(tipo.is.null,tipo.neq.grupo)'
+  const SEM_CAMPANHA = 'aguardando_resposta_campanha.not.is.true'
+  const TEM_MOVIMENTO = 'or(tem_mensagem.eq.true,atendente_id.not.is.null)'
+
+  const userId =
+    ctx?.user_id != null && Number.isFinite(Number(ctx.user_id)) ? Number(ctx.user_id) : null
+  const participantes = (ctx?.conversaIdsParticipanteAtivo || [])
+    .map(Number)
+    .filter((n) => Number.isFinite(n) && n > 0)
+  const vinculadaParts = []
+  if (userId != null) vinculadaParts.push(`atendente_id.eq.${userId}`)
+  if (participantes.length > 0) vinculadaParts.push(`id.in.(${participantes.join(',')})`)
+  const vinculadaAoUsuario =
+    vinculadaParts.length === 0
+      ? NUNCA
+      : vinculadaParts.length === 1
+        ? vinculadaParts[0]
+        : `or(${vinculadaParts.join(',')})`
+
+  if (overrides.minha_fila === true) {
+    const parts = []
+    const fixados = (ctx?.grupoIdsFixadosNaMinhaFila || [])
+      .map(Number)
+      .filter((n) => Number.isFinite(n) && n > 0)
+    if (fixados.length > 0) parts.push(`and(tipo.eq.grupo,id.in.(${fixados.join(',')}))`)
+    parts.push(
+      `and(${NAO_GRUPO},${SEM_CAMPANHA},status_atendimento.in.(em_atendimento,aguardando_cliente,pagamento_pendente,em_atraso),${vinculadaAoUsuario})`
+    )
+    const livreOuMeu =
+      userId != null ? `or(atendente_id.is.null,atendente_id.eq.${userId})` : 'atendente_id.is.null'
+    parts.push(
+      `and(${NAO_GRUPO},${SEM_CAMPANHA},status_atendimento.eq.aberta,${livreOuMeu},${TEM_MOVIMENTO})`
+    )
+    return parts.join(',')
+  }
+
+  if (overrides.status_atendimento === 'aberta') {
+    return `tipo.eq.grupo,and(${NAO_GRUPO},${SEM_CAMPANHA},status_atendimento.eq.aberta,${TEM_MOVIMENTO})`
+  }
+
+  if (overrides.status_atendimento === 'em_atendimento' && !overrides.aguardando_cliente) {
+    if (ctx?.isAtendente) {
+      return `and(${NAO_GRUPO},status_atendimento.eq.em_atendimento,${vinculadaAoUsuario})`
+    }
+    const filtroAtendente =
+      ctx?.filtroAtendenteInformado != null ? Number(ctx.filtroAtendenteInformado) : null
+    const porAtendente = filtroAtendente != null ? `atendente_id.eq.${filtroAtendente},` : ''
+    return `and(${NAO_GRUPO},${porAtendente}status_atendimento.in.(em_atendimento,aguardando_cliente))`
+  }
+
+  return null
+}
+
+/**
+ * Contador das abas com regra pós-lista. Com `conversas.tem_mensagem` no banco é um
+ * `count(*)` exato, sem embed e sem teto; sem a coluna (42703 na 1ª tentativa, lembrado por
+ * processo) cai na varredura antiga, idêntica à de antes da coluna existir.
+ */
 async function countConversasWithPostListRules(ctx, overrides = {}) {
+  // Coluna presente E backfill concluído (sonda 1× por processo) — senão o count(*) sairia MENOR
+  // que o real em silêncio (doc 41: a causa provável dos chips zerados de 11/11).
+  if (temMensagemDisponivel() && (await temMensagemPronta())) {
+    const predicado = buildPostListRulesSqlOr(ctx, overrides)
+    if (predicado) {
+      let q = supabase.from('conversas').select('id', { count: 'exact', head: true })
+      q = applyChatListSqlFilters(q, ctx, overrides).or(predicado)
+      const { count, error } = await q
+      if (!error) return Number(count) || 0
+      if (!erroDeTemMensagemAusente(error)) throw error
+      desligarTemMensagem()
+    }
+  }
+  return countConversasWithPostListRulesVarrendo(ctx, overrides)
+}
+
+/** Caminho antigo: varre até CHAT_FILTER_ID_LIMIT linhas com embed `mensagens(id)` e PARA no teto. */
+async function countConversasWithPostListRulesVarrendo(ctx, overrides = {}) {
   const pageSize = Math.min(getChatFilterIdLimit(), 1000)
   const maxRows = getChatFilterIdLimit()
   let total = 0
@@ -966,4 +1063,5 @@ module.exports = {
   withTimeout,
   getStartOfTodayIso,
   getEndOfTodayIso,
+  _test: { buildPostListRulesSqlOr },
 }
