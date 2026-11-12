@@ -15,6 +15,7 @@
  * Isolamento: `company_id` SEMPRE de `req.user.company_id` (nunca do body).
  */
 const supabase = require('../config/supabase')
+const { invalidateAlertaSemRespostaCache } = require('../helpers/reabertaFaltaInteracaoHelper')
 const {
   DEFAULT_CHATBOT_CONFIG,
   validateChatbotConfig,
@@ -209,6 +210,8 @@ exports.putConfig = async (req, res) => {
 
     if (error) { console.error('[iaController]', error?.message); return res.status(500).json({ error: 'Erro interno' }) }
     invalidateChatbotConfigCache(company_id)
+    // `config` regravado por inteiro (preserva alerta_sem_resposta, mas o cache do booleano relê).
+    invalidateAlertaSemRespostaCache(company_id)
     return res.json(data?.config ?? merged)
   } catch (err) {
     console.error(err)

@@ -1,4 +1,5 @@
 const supabase = require('../config/supabase')
+const { invalidateEmpresaModoSimplesCache } = require('../helpers/empresaModoSimplesFlag')
 const crmSync = require('../services/crmSyncService')
 const { getProvider } = require('../services/providers')
 const { resolveCompanyWhatsappProvider } = require('../services/chat/identity/conversationAddressService')
@@ -155,6 +156,9 @@ exports.putEmpresa = async (req, res) => {
       console.error('[configController] updateEmpresa', error?.message)
       return res.status(500).json({ error: 'Erro interno' })
     }
+    // A flag `atendimento_modo_simples` é cacheada por empresa (helpers/empresaModoSimplesFlag);
+    // qualquer update bem-sucedido aqui a invalida para GET /chats ler o valor novo na hora.
+    if (Object.keys(update).length > 0) invalidateEmpresaModoSimplesCache(company_id)
 
     // Espelha a empresa no CRM Avançado (fire-and-forget). O CRM usa o company_id
     // do ZapERP como próprio ID. A tabela empresas não tem cnpj/email/telefone —

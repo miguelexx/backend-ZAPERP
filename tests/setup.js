@@ -35,6 +35,19 @@ jest.mock('../config/supabase', () => {
 })
 
 beforeEach(() => {
+  // Caches de configuração por empresa (doc 41 §7): cada teste parte de cache vazio, senão
+  // um `maybeSingle` mockado com valor novo seria ignorado por um TTL inteiro.
+  for (const [mod, campo] of [
+    ['../helpers/empresaModoSimplesFlag', '_empresaModoSimplesCache'],
+    ['../helpers/financeiroSetorHelper', '_financeiroSetorCache'],
+    ['../helpers/reabertaFaltaInteracaoHelper', '_alertaSemRespostaCache'],
+    ['../helpers/colaboradoresEncaminharHelper', '_colaboradoresEncaminharCache'],
+  ]) {
+    try {
+      const cache = require(mod)[campo]
+      if (cache && typeof cache.clear === 'function') cache.clear()
+    } catch (_) { /* módulo mockado no teste sem o campo: nada a limpar */ }
+  }
   const moduloCampanhas = require('../helpers/moduloCampanhas')
   if (jest.isMockFunction(moduloCampanhas.empresaModuloCampanhasAtivo)) {
     moduloCampanhas.empresaModuloCampanhasAtivo.mockResolvedValue(true)

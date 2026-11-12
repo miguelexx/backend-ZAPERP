@@ -1,5 +1,6 @@
 const supabase = require('../../config/supabase')
 const { normalizePositiveIds, isGroupRow } = require('../../helpers/departamentoGruposHelper')
+const { invalidateFinanceiroSetorCache } = require('../../helpers/financeiroSetorHelper')
 
 async function listarDepartamentos(req, res) {
   try {
@@ -28,6 +29,7 @@ async function criarDepartamento(req, res) {
       .select()
       .single()
     if (error) { console.error('[dashboardController]', error?.message); return res.status(500).json({ error: 'Erro interno' }) }
+    invalidateFinanceiroSetorCache(company_id)
     return res.status(201).json(data)
   } catch (err) {
     console.error(err)
@@ -50,6 +52,7 @@ async function atualizarDepartamento(req, res) {
       .single()
     if (error) { console.error('[dashboardController]', error?.message); return res.status(500).json({ error: 'Erro interno' }) }
     if (!data) return res.status(404).json({ error: 'Departamento não encontrado' })
+    invalidateFinanceiroSetorCache(company_id)
     return res.json(data)
   } catch (err) {
     console.error(err)
@@ -118,6 +121,7 @@ async function excluirDepartamento(req, res) {
       .eq('id', depId)
       .eq('company_id', company_id)
     if (error) { console.error('[dashboardController]', error?.message); return res.status(500).json({ error: 'Erro interno' }) }
+    invalidateFinanceiroSetorCache(company_id)
     return res.json({ ok: true })
   } catch (err) {
     console.error(err)
