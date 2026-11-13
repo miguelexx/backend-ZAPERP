@@ -46,6 +46,42 @@ listas `v_manter`/`manter` iguais, senão o relatório deixa de bater com a excl
 O SQL Editor do Supabase não reconhece esses dois e quebra o statement no `;` errado, gerando
 `42601: unterminated dollar-quoted string`. Se for editar, mantenha essa restrição.
 
+## `COMPANY_3_*.sql` — zerar o histórico da empresa 3
+
+Mesmo escopo e mesma lista `manter`/`v_manter` dos `COMPANY_31_*` (zera dados operacionais,
+preserva atendentes, acesso, conexão e configuração), já parametrizado para a empresa 3, com duas
+melhorias que valem para qualquer limpeza futura — **prefira copiar estes, não os `COMPANY_31_*`**:
+
+| Arquivo | O que faz |
+|---|---|
+| `COMPANY_3_0_MENSAGENS_EM_LOTES.sql` | Opcional, só se `mensagens` da empresa passar de ~500 mil linhas. |
+| `COMPANY_3_1_SIMULAR.sql` | **Só leitura.** Primeira linha mostra o **nome** da empresa 3 — confira antes. Rode antes e depois. |
+| `COMPANY_3_2_APAGAR.sql` | Apaga o histórico. Bloco único = transação única; travou FK ou sobrou linha, faz rollback de tudo. |
+| `COMPANY_3_3_USUARIOS_SIMULAR.sql` | **Só leitura.** Lista os usuários da empresa (`MANTER`/`APAGAR`) e o efeito por FK (`SET NULL`/`APAGAR LINHA`). |
+| `COMPANY_3_4_USUARIOS_APAGAR.sql` | Remove os atendentes da empresa **exceto** os ids de `v_manter_ids`. Rode depois do `_2_`. |
+
+Os `_3_`/`_4_` existem porque o editor de tabelas do Supabase não consegue excluir usuário
+referenciado por FK (`Unable to delete rows as one of them is currently referenced by a foreign key
+constraint from the table atendimentos`). São 60+ FKs apontando para `usuarios`, então o script
+varre `pg_constraint`: coluna que aceita NULL vira `SET NULL` (a linha filha sobrevive sem o
+vínculo), coluna `NOT NULL` faz a linha filha ser apagada — e só se ela for da empresa alvo ou sem
+`company_id`, nunca de outra empresa.
+
+1. **Linhas órfãs/cross-tenant.** A ETAPA A dos `COMPANY_31_*` só olhava filha **sem** `company_id`.
+   Aqui ela também apaga a linha de uma filha **com** `company_id` que esteja órfã (`company_id`
+   NULL, legado anterior ao hardening multi-tenant) ou de outra empresa apontando para um registro
+   da empresa alvo. É o caso real de `atendimentos` com `company_id` NULL, que fazia o script
+   abortar com `violates foreign key constraint "atendimentos_para_usuario_id_fkey"`. O relatório
+   marca essas linhas com `(orfas/cross-tenant)`.
+2. **Erro de FK legível.** Ao abortar, a exceção cita a última tabela e a mensagem do Postgres,
+   em vez de só "ainda havia FK bloqueando".
+
+Para preservar/zerar mais alguma coisa, mexa na tabela nas **duas** listas — `manter` no simular e
+`v_manter` no apagar. Para descontinuar a empresa de vez (apagar `usuarios` e `whatsapp_instances`),
+deixe as duas listas só com `empresas`. Para outra empresa, troque o `3` em `cfg` (simular) e
+`v_company` (apagar). Não apaga a mídia no R2/Storage e não desativa a instância no painel do
+provider.
+
 ## Os demais arquivos
 
 `APAGAR_DADOS_COMPANY_4.sql`, `EXCLUIR_CLIENTE_ESPECIFICO.sql`, `EXCLUIR_CONVERSAS_LISTA_ESPECIFICA.sql`,
