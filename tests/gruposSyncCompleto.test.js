@@ -500,4 +500,60 @@ describe('syncGroups — todos os números ativos da empresa', () => {
     expect(r.errors.join(' ')).toContain('canal fora do ar')
     expect(conversas).toEqual(['120363000000000002@g.us'])
   })
+
+  test('22001 (telefone varchar(20)) vira aviso que diz o que fazer, e não derruba os outros grupos', async () => {
+    jest.doMock('../config/supabase', () => ({
+      from: () => {
+        const q = {
+          select: () => q, eq: () => q, in: () => q, order: () => q, limit: () => q, update: () => q,
+          then: (resolve) => Promise.resolve({ data: [], error: null }).then(resolve),
+        }
+        return q
+      },
+    }))
+    jest.doMock('../services/whatsappInstanceService', () => ({
+      listWhatsappInstances: jest.fn(async () => ({
+        instances: [{ id: 1, provider: 'whapi', ativo: true, is_default: true }],
+        error: null,
+      })),
+    }))
+    jest.doMock('../services/chat/identity/conversationAddressService', () => ({
+      resolveCompanyWhatsappProvider: jest.fn(async () => 'whapi'),
+    }))
+    jest.doMock('../services/whatsappConfigService', () => ({
+      getEmpresaWhatsappConfig: jest.fn(async () => ({ config: {}, error: null })),
+    }))
+    jest.doMock('../services/providers', () => ({
+      getProvider: jest.fn(() => ({
+        getGroups: jest.fn(async () => [
+          { id: '553484315821-1634262477@g.us', name: 'Grupo antigo' },
+          { id: '120363000000000002@g.us', name: 'Grupo novo' },
+        ]),
+        getGroup: jest.fn(async () => null),
+        getProfilePicture: jest.fn(async () => null),
+      })),
+    }))
+    jest.doMock('../helpers/conversationSync', () => ({
+      findOrCreateConversation: jest.fn(async (_sb, args) => {
+        if (String(args.phone).includes('-')) {
+          const err = new Error('value too long for type character varying(20)')
+          err.code = '22001'
+          throw err
+        }
+        return { conversa: { id: 1, telefone: args.phone }, created: true }
+      }),
+      getOrCreateCliente: jest.fn(async () => ({ cliente_id: 1 })),
+    }))
+    jest.doMock('../helpers/phoneHelper', () => ({ normalizePhoneBR: (p) => p }))
+
+    const { syncGroups } = require('../services/ultramsgGroupsSyncService')
+    const r = await syncGroups(1)
+
+    expect(r.ok).toBe(true)
+    expect(r.inserted).toBe(1)
+    expect(r.errors).toHaveLength(1)
+    expect(r.errors[0]).toContain('553484315821-1634262477')
+    expect(r.errors[0]).toContain('migration')
+    expect(r.errors[0]).not.toContain('character varying')
+  })
 })

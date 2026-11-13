@@ -238,6 +238,23 @@ async function persistirGrupo(company_id, target, fields) {
 }
 
 /**
+ * Mensagem de erro de UM grupo, no tamanho que a tela mostra.
+ *
+ * `22001` (value too long) é a falha do id de grupo LEGADO (`<dono>-<criação>`, 23 chars) contra
+ * `conversas.telefone varchar(20)`: a mensagem crua do Postgres não diz nada ao atendente e o
+ * grupo nunca entra — nem pelo botão nem pelo webhook. Migration:
+ * `supabase/migrations/20261113120000_conversas_telefone_grupo_legado.sql`.
+ */
+function descreverFalhaDeGrupo(e) {
+  const code = String(e?.code || '')
+  const msg = String(e?.message || e || '')
+  if (code === '22001' || /value too long for type character varying/i.test(msg)) {
+    return 'ID de grupo antigo não cabe na coluna telefone — aplicar a migration conversas.telefone'
+  }
+  return msg.slice(0, ERROR_MESSAGE_MAX_LENGTH)
+}
+
+/**
  * Sincroniza os grupos de TODOS os números ativos da empresa (GET /groups de cada instância).
  */
 async function syncGroups(company_id) {
@@ -289,7 +306,7 @@ async function syncGroups(company_id) {
         const desfecho = await persistirGrupo(company_id, target, fields)
         stats[desfecho] += 1
       } catch (e) {
-        const errorMessage = String(e?.message || e).slice(0, ERROR_MESSAGE_MAX_LENGTH)
+        const errorMessage = descreverFalhaDeGrupo(e)
         stats.errors.push(`${fields.telefone}: ${errorMessage}`)
       }
     }

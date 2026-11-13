@@ -1693,3 +1693,55 @@ Frontend: 60/60 scripts Node e `e2e/configuracoes-local-mock.spec.js` 12/12.
 > intermitente no arranque a frio do Vite — aqui falhou uma vez e passou nas duas conferências
 > seguintes, com e sem as mudanças. Antes de atribuir a falha ao seu código, rode o arquivo de
 > novo com o dev server já quente.
+
+## 2026-11-13 — O grupo antigo não cabe no banco: `conversas.telefone varchar(20)`
+
+Depois do deploy das correções de 10/11, o botão "Sincronizar todos os grupos" passou a devolver
+aviso âmbar em vez de silêncio:
+
+```
+11 grupo(s) encontrado(s) em 1 número(s): 1 novo(s), 0 atualizado(s), 8 sem alteração.
+2 aviso(s): 553484315821-1634262477: value too long for type character varying(20)
+          · 553499723470-1584628565: value too long for type character varying(20)
+```
+
+**A conta fecha:** 1 + 0 + 8 = 9 gravados, 2 recusados pelo banco = os 11 do canal. Nenhum grupo
+sumiu no caminho — a listagem e o filtro estão certos; quem recusa é o Postgres.
+
+**A causa:** `conversas.telefone` é `character varying(20)` em produção
+(`supabase/schema.sql` é um dump sem os comprimentos, por isso não aparece lá). O id de grupo
+LEGADO é `<telefone do dono>-<timestamp da criação>` → `553484315821-1634262477` tem **23
+caracteres**. O id moderno (`120363…`) tem 18 e sempre coube — por isso só os grupos pré-2021
+falham, e por isso a correção de 10/11 (aceitar o id legado em `extractGroupFields`) trocou um
+descarte silencioso por um erro visível: o código agora chega ao INSERT e o INSERT é que morre.
+
+Vale para os **dois** caminhos, porque ambos passam por `findOrCreateConversation`
+(`helpers/conversationSync.js`, passo 6 — `telefoneToInsert`): o botão de sync E o webhook de
+inbound. Ou seja, mensagem de grupo antigo também não cria conversa. Explica a medição de 10/11
+("432 grupos no banco, **zero** com ID legado") sem precisar de apagamento nenhum.
+
+### O que mudou
+
+1. **Migration (NÃO aplicada — o Miguel roda no SQL Editor):**
+   `supabase/migrations/20261113120000_conversas_telefone_grupo_legado.sql` —
+   `alter table public.conversas alter column telefone type character varying(64)`, com SELECT de
+   conferência antes e depois e a query que lista os grupos legados já gravados. Nenhuma view
+   depende da coluna; os índices de `telefone` são recriados pelo próprio ALTER (ACCESS EXCLUSIVE
+   durante a reescrita → rodar fora do pico). **Migration antes do deploy** (anti-padrão 14) e,
+   depois dela, clicar de novo em "Sincronizar todos os grupos".
+2. **`services/ultramsgGroupsSyncService.js`** — novo `descreverFalhaDeGrupo()`: `22001` (ou a
+   mensagem "value too long for type character varying") vira *"ID de grupo antigo não cabe na
+   coluna telefone — aplicar a migration conversas.telefone"*. O aviso âmbar passa a dizer o que
+   fazer em vez de despejar o erro cru do Postgres. Os outros grupos continuam entrando.
+
+### Testes
+
+`tests/gruposSyncCompleto.test.js` ganhou 1 caso (18 no arquivo): 22001 num grupo não derruba o
+outro e o aviso cita a migration, não o `character varying`.
+
+### Residual
+
+- `clientes.telefone` deve ter o mesmo `varchar(20)` — nenhum caminho grava id de grupo lá
+  (grupo entra com `cliente_id = null`), então ficou fora desta migration.
+- Enquanto a coluna não for ampliada, grupo antigo continua sem entrar por nenhum caminho; não
+  adianta re-sincronizar.
