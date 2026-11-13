@@ -212,7 +212,9 @@ async function resolveChatListCountsContext(req) {
   const isFinanceiro = await usuarioPertenceSetorFinanceiro(departamento_ids, company_id)
 
   let conversaIdsTransferidas = []
-  let conversaIdsParticipanteAtivo = []
+  // Co-atendente ("Puxar conversa") também vale para ADMIN — sem isto o contador da Minha fila
+  // do admin ignora as conversas que ele puxou e fica divergente da lista.
+  let conversaIdsParticipanteAtivo = await getConversaIdsParticipanteAtivo(company_id, user_id)
   if (!isAdmin) {
     const transferLimit = getChatFilterIdLimit()
     const { data: transferRows } = await supabase
@@ -224,7 +226,6 @@ async function resolveChatListCountsContext(req) {
       .order('criado_em', { ascending: false })
       .limit(transferLimit)
     conversaIdsTransferidas = [...new Set((transferRows || []).map((r) => Number(r.conversa_id)).filter(Boolean))]
-    conversaIdsParticipanteAtivo = await getConversaIdsParticipanteAtivo(company_id, user_id)
   }
 
   let grupoIdsPermitidosPorDepartamento = []

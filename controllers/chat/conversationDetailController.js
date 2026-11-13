@@ -459,6 +459,10 @@ exports.detalharChat = async (req, res) => {
         next_cursor_id:
           hasMoreFromDb && oldestDbRow != null && oldestDbRow.id != null ? oldestDbRow.id : null,
         mensagens_bloqueadas: deveBloquearMensagens || undefined,
+        // Mesmo campo que a linha da lista expõe: é o que o frontend usa para saber que o
+        // viewer já é co-atendente (esconde o botão "Puxar conversa" e mantém a conversa na
+        // Minha fila). Sem devolver aqui, o patch otimista do puxar era perdido no refresh.
+        participante_ativo: isParticipanteAtivo === true,
       },
       conversa,
       detalheModoSimplesAtivo

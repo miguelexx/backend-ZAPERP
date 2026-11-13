@@ -158,9 +158,15 @@ exports.listarConversas = async (req, res) => {
         .catch(() => ({ separar: false, campanhasModulo: false })),
       empresaModoSimplesAtivo(company_id).catch(() => false),
       obterUnreadMap({ company_id, usuario_id: user_id }),
-      !isAdmin
-        ? Promise.all([
-            supabase
+      // Co-atendente ("Puxar conversa") também vale para ADMIN: sem carregar os ids aqui, a
+      // conversa que o admin puxou nunca entra na Minha fila dele (nem pela cláusula SQL de
+      // minhaFilaAtiva nem pelo pós-filtro) e a linha volta com participante_ativo:false,
+      // derrubando o insert otimista do frontend. O histórico de "transferiu" segue só para
+      // não-admin (admin já enxerga as conversas de todos os setores).
+      Promise.all([
+        isAdmin
+          ? Promise.resolve([])
+          : supabase
               .from('atendimentos')
               .select('conversa_id')
               .eq('company_id', company_id)
@@ -169,9 +175,8 @@ exports.listarConversas = async (req, res) => {
               .order('criado_em', { ascending: false })
               .limit(transferLimit)
               .then(({ data }) => [...new Set((data || []).map((r) => Number(r.conversa_id)).filter(Boolean))]),
-            getConversaIdsParticipanteAtivo(company_id, user_id),
-          ])
-        : Promise.resolve([[], []]),
+        getConversaIdsParticipanteAtivo(company_id, user_id),
+      ]),
       !isAdmin
         ? getGrupoIdsPorDepartamentos(company_id, departamento_ids)
         : filter_dep_id

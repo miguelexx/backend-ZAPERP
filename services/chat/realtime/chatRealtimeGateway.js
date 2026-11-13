@@ -200,11 +200,21 @@ function emitirEventoEmpresaConversa(io, company_id, conversa_id, eventName, pay
   io.to(`empresa_${company_id}`).emit(eventName, payload)
 }
 
-/** Quando `emitirConversaAtualizada` usa skipAtualizarConversa (evita flicker), ainda força sync da lista lateral / “Minha fila”. */
+/**
+ * Quando `emitirConversaAtualizada` usa skipAtualizarConversa (evita flicker), ainda força sync da
+ * lista lateral / “Minha fila”.
+ *
+ * Vai para a EMPRESA inteira de propósito: quem PERDEU a visibilidade (assumida por outro,
+ * transferida de setor) não está mais na lista de "quem pode ver" e precisa deste sinal para tirar
+ * o card. `motivo: 'atendimento'` (doc 41 §7): o frontend que conhece o flag só refaz o
+ * `GET /chats/:id` se TEM o card — quem nunca teve não tem o que tirar nem atualizar (quem ganhou
+ * visibilidade entra pelo `conversa_atualizada`/`conversa_transferida`). Antes, cada assumir
+ * fazia todo usuário da empresa pedir o detalhe e levar 403. Frontend antigo ignora o campo.
+ */
 function emitirSincronizacaoListaConversas(io, company_id, conversa_id) {
   if (!io || company_id == null || conversa_id == null) return
   const ev = io.EVENTS?.ATUALIZAR_CONVERSA || 'atualizar_conversa'
-  io.to(`empresa_${Number(company_id)}`).emit(ev, { id: Number(conversa_id) })
+  io.to(`empresa_${Number(company_id)}`).emit(ev, { id: Number(conversa_id), motivo: 'atendimento' })
 }
 
 // ⭐ LOCK REALTIME (SEMANA 3)
