@@ -151,9 +151,20 @@ async function enviarArquivoProcessarUm(req, file, { company_id, user_id, conver
             const elapsedSec = elapsedMs / 1000
             const isInflated = probedSec > elapsedSec * 2 && (probedSec - elapsedSec) > 30
             const isTruncated = probedSec < elapsedSec * 0.6 && (elapsedSec - probedSec) > 3
-            if (isInflated || isTruncated) {
+            // "Mais curto que o cronômetro" NÃO é corrupção: com `asetpts=N/SR/TB` o OGG contém
+            // exatamente as amostras capturadas. Lacunas do microfone no celular (troca para fone
+            // bluetooth, CPU estrangulada, ligação, tela bloqueada) encurtam o áudio, mas o que foi
+            // gravado é fala real. Recusar com 422 jogava fora o áudio inteiro ("alguns áudios do
+            // celular não vão"). Só recusa quando praticamente nada foi capturado.
+            const isEmpty = isTruncated && probedSec < 1
+            if (isTruncated && !isEmpty) {
+              console.warn('[AUDIO][GUARD] OGG mais curto que o tempo gravado (lacunas na captura); enviando o que foi capturado:', {
+                probedSec, elapsedSec,
+              })
+            }
+            if (isInflated || isEmpty) {
               console.error('[AUDIO][GUARD] OGG com duração incoerente após transcode:', {
-                probedSec, elapsedSec, isInflated, isTruncated,
+                probedSec, elapsedSec, isInflated, isTruncated, isEmpty,
               })
               try { require('fs').unlink(fileWork.path, () => {}) } catch {}
               return {
