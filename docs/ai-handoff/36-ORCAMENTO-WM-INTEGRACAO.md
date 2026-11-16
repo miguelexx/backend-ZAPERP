@@ -768,6 +768,52 @@ sem mexer no `useAutoScroll` da conversa, ordem de Escape, lista virtualizada e 
 **Pronto quando:** um usuário conclui o caminho comum pesquisando só por nomes, sem conhecer código
 ERP, e o rascunho sobrevive a erro e a fechamento acidental.
 
+#### Passagem de celular — 16/11/2026 (frontend, **não deployada**)
+
+O drawer da Sessão 5 nasceu desenhado para a largura de 560px e espremido por media query no
+celular. Medido no aparelho antes de mexer (375 × 812, tema claro, com a faixa de ERP fora do ar na
+tela): **cabeçalho 88px + faixa 144px + rodapé 63px**, sobrando **437px de janela rolável para
+1152px de formulário**. Dois itens do carrinho por tela — e o topo era ocupado pela parte JÁ
+RESOLVIDA (cliente e vendedor escolhidos, com um parágrafo de regra cada).
+
+Depois: **cabeçalho 57px, janela 494px, conteúdo 880px**, e o formulário da primeira abertura (sem
+itens) passa a caber inteiro numa tela só.
+
+Três frentes, e nenhuma delas tira informação do produto:
+
+1. **Árvore, não só layout** — `useOrcamentoMobile.js` (novo) consulta `matchMedia("(max-width:
+   600px)")` no PRIMEIRO render, e no celular:
+   · cliente + vendedor **com código do ERP nos dois** viram uma linha (`.wa-orc-destinoResumo`), e
+     os campos saem do DOM; "Alterar" devolve o bloco, "Pronto" recolhe. Só com CÓDIGO — texto
+     digitado nunca recolhe, senão o campo sumiria debaixo do dedo de quem está digitando;
+   · o **desconto no total** começa atrás de um botão só. Com desconto APLICADO ele nunca fica
+     escondido (o caminho de voltar atrás tem de estar onde o valor foi dado);
+   · o **"alterar preço"** de cada item entra na linha dos valores, encostado no preço que altera,
+     em vez de uma linha própria de 40px por item;
+   · a orientação longa da busca ("nome, marca ou código de barras") vira **placeholder** do campo,
+     em vez de um parágrafo fixo de duas linhas acima da lista de resultados.
+   `display: none` não serviria para nada disso: o nó continuaria tabulável, lido por leitor de tela
+   e montado com o estado dele vivo.
+
+2. **Teclado** — `useDrawerViewport.js` (novo) escreve `--orc-vvh`/`--orc-vvtop` a partir de
+   `visualViewport`, e a media query do celular passa a medir o painel pela viewport VISÍVEL. No
+   Android a viewport de layout já encolhe sozinha; **no iOS não**, e era por isso que a lista de
+   resultados e o "Calcular" nasciam atrás do teclado — justamente numa tela cujo trabalho é digitar.
+   Medido no harness: com a área visível em 380px, o rodapé termina em y=380 em vez de y=812.
+   Ele NÃO encosta no sistema de scroll/teclado da conversa: escreve só no nó do drawer, com outro
+   prefixo, e some quando o drawer fecha.
+
+3. **Alvo de toque** (`@media (pointer: coarse)`, independente da largura) — `−`/`+` e o campo de
+   quantidade a 44px (errar o "+" soma unidade errada num orçamento que vai para o ERP), "Calcular"
+   a 48px, secundários a 40px.
+
+Contraste medido depois: "Alterar" 4,67:1 · "Alterar preço" 5,20:1 (o azul da marca rendia **4,47:1**
+sobre o card tingido do carrinho — abaixo do piso; o token foi escurecido a 80%, com o escuro
+mantendo o original). Detector mecânico do Impeccable: zero achados.
+
+**Testes:** `scripts/test-orcamento-frontend.mjs` — 1219 asserções, 11 delas novas, provando que o
+que some no celular some do DOM e que o desktop continua idêntico. Suíte Node inteira: 62/62.
+
 ### Sessão 6 — Criação — **IMPLEMENTADA (21/10), NÃO DEPLOYADA**
 
 Confirmação, criação idempotente, tela de resultado e resumo por template fixo com os dados oficiais
