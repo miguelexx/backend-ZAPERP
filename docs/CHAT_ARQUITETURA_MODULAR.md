@@ -43,6 +43,9 @@ config/supabase · helpers/** · services/** (não-chat)
   - `assertPermissaoConversa({company_id,conversa_id,user_id,role,user_dep_ids})` → quem pode **ver**
     (admin/supervisor/atendente, responsável, participante ativo, quem transferiu, encerrada, grupo por setor).
   - `assertPodeEnviarMensagem({...,autoAssumirAoEnviar,io})` → quem pode **enviar** (+ auto-assumir no 1º envio; modo simples).
+  - `assertPodeReagirMensagem({company_id,conversa_id,user_id,role,user_dep_ids})` → quem pode **reagir**:
+    delega para `assertPermissaoConversa` (ver = reagir). Reagir **não** exige assumir a conversa nem
+    reabrir atendimento encerrado — usado por `enviarReacaoMensagem`/`removerReacaoMensagem`.
   - `podeAssumirConversaPorPerfil(role)`.
 - **`conversationVisibilityService.js`** — visibilidade + cache (TTL 15s, local ao processo) + unread por setor.
   - `obterUsuarioIdsQuePodemVerConversa`, `carregarUsuarioIdsQuePodemVerConversaSemCache`,

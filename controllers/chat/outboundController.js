@@ -10,7 +10,7 @@ const { getDisplayName } = require('../../helpers/contactEnrichment')
 const { tryMarkWaitingAfterHumanOutbound } = require('../../services/absenceFinalizationService')
 const { resolveTelefoneFromLidSiblingConversation, resolveConversationWhatsappInstance, resolveConversationProvider } = require('../../services/chat/identity/conversationAddressService')
 const { emitirConversaAtualizada, emitirEventoEmpresaConversa } = require('../../services/chat/realtime/chatRealtimeGateway')
-const { assertPodeEnviarMensagem } = require('../../services/chat/access/conversationPolicy')
+const { assertPodeEnviarMensagem, assertPodeReagirMensagem } = require('../../services/chat/access/conversationPolicy')
 const { getUsuarioParaEnvioCliente, enrichMensagemComAutorUsuario } = require('../../services/chat/presentation/messageAuthorEnrichment')
 const { aplicarAguardandoClienteNoPayload, anexarAssumirNoPayloadLista } = require('../../services/chat/outbound/modoSimplesOutbound')
 const { mapProviderSendResult, mapProviderSendResultComTransitoria, enviarSemEstourar } = require('../../services/chat/outbound/providerResultMapper')
@@ -28,8 +28,9 @@ exports.enviarReacaoMensagem = async (req, res) => {
       return res.status(400).json({ error: 'reaction é obrigatório' })
     }
 
-    const permEnvio = await assertPodeEnviarMensagem({ company_id, conversa_id, user_id, role: req.user?.perfil, user_dep_ids: req.user?.departamento_ids })
-    if (!permEnvio.ok) return res.status(permEnvio.status).json({ error: permEnvio.error })
+    // Reagir nao exige assumir a conversa (nem reabrir encerrada): basta poder ver o chat.
+    const permReacao = await assertPodeReagirMensagem({ company_id, conversa_id, user_id, role: req.user?.perfil, user_dep_ids: req.user?.departamento_ids })
+    if (!permReacao.ok) return res.status(permReacao.status).json({ error: permReacao.error })
 
     // busca conversa + mensagem para garantir que pertencem à empresa
     const { data: conversa, error: errConv } = await supabase
@@ -92,8 +93,9 @@ exports.removerReacaoMensagem = async (req, res) => {
     const { company_id, id: user_id, perfil } = req.user
     const { id: conversa_id, mensagem_id } = req.params
 
-    const permEnvio = await assertPodeEnviarMensagem({ company_id, conversa_id, user_id, role: req.user?.perfil, user_dep_ids: req.user?.departamento_ids })
-    if (!permEnvio.ok) return res.status(permEnvio.status).json({ error: permEnvio.error })
+    // Reagir nao exige assumir a conversa (nem reabrir encerrada): basta poder ver o chat.
+    const permReacao = await assertPodeReagirMensagem({ company_id, conversa_id, user_id, role: req.user?.perfil, user_dep_ids: req.user?.departamento_ids })
+    if (!permReacao.ok) return res.status(permReacao.status).json({ error: permReacao.error })
 
     const { data: conversa, error: errConv } = await supabase
       .from('conversas')

@@ -273,8 +273,33 @@ async function assertPodeEnviarMensagem({
   }
 }
 
+/**
+ * Reagir a uma mensagem NAO e "falar" na conversa: e uma acao leve (emoji sobre a bolha), igual
+ * ao WhatsApp Web, onde qualquer pessoa com acesso ao chat reage sem assumir nada. Por isso o
+ * gate aqui e o de VER a conversa (`assertPermissaoConversa`) e nao o de ENVIAR — que exigiria
+ * assumir o atendimento (403 "Assuma a conversa antes de enviar mensagens") ou reabrir uma
+ * conversa encerrada (409).
+ *
+ * Todas as barreiras de visibilidade continuam valendo: empresa, numero WhatsApp permitido,
+ * setor, grupo vinculado ao setor e "atendente nao ve individual assumida por outro".
+ */
+async function assertPodeReagirMensagem({
+  company_id,
+  conversa_id,
+  user_id,
+  role = null,
+  user_dep_ids = [],
+}) {
+  const perm = await assertPermissaoConversa({ company_id, conversa_id, user_id, role, user_dep_ids })
+  if (!perm.ok) {
+    return { ok: false, status: perm.status || 403, error: perm.error || 'Sem permissao para esta conversa' }
+  }
+  return { ok: true, reason: 'reacao_sem_exigir_assumir', conversa: perm.conv }
+}
+
 module.exports = {
   assertPermissaoConversa,
   podeAssumirConversaPorPerfil,
   assertPodeEnviarMensagem,
+  assertPodeReagirMensagem,
 }
