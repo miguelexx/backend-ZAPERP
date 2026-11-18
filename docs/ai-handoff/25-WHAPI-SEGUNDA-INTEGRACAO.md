@@ -1745,3 +1745,31 @@ outro e o aviso cita a migration, não o `character varying`.
   (grupo entra com `cliente_id = null`), então ficou fora desta migration.
 - Enquanto a coluna não for ampliada, grupo antigo continua sem entrar por nenhum caminho; não
   adianta re-sincronizar.
+
+---
+
+## Menu da Triagem aparecia como "Mensagem" — eco chegou antes do insert (18/11/2026, não deployado)
+
+**Sintoma:** a bolha do menu interativo da Triagem Whapi ("Olá! Seja bem-vindo(a)… escolha o
+setor") aparecia como **"Mensagem"**, e a citação do cliente ao responder também ("Você ·
+Mensagem"). Intermitente: a mesma empresa gravou o menu certo 17 min antes (conversa 38572 ok,
+27939 quebrada).
+
+**Causa (corrida de dois lados):**
+1. `webhookWhapiController.normalizeWhapiMessageToInternal` não lia o corpo de um interactive
+   **enviado** (`from_me`, `interactive: { body: { text } }`) — `extractInteractiveReply` só cobre
+   resposta tocada. Texto vazio → `(mídia)` → `(mensagem)` (webhookZapiController, espelhamento fromMe).
+2. Se esse eco chega **antes** de `whapiTriageService.insertBotBubble`, o insert da triagem bate
+   no índice único `(conversa_id, whatsapp_id)` e era só logado (`falha ao gravar bolha outbound`)
+   e descartado. Pista na linha: `criado_em` sem microssegundos (timestamp do provedor) e
+   `tipo='texto'` em vez de `interactive`.
+
+**Correção:**
+- Normalizador: `extractSentInteractiveBodyText` (exportado em `_test`) dá o texto do corpo ao
+  eco `from_me` de `type: 'interactive'`. Inbound não muda.
+- `insertBotBubble`: em 23505 com id rastreável, `completeEchoRowWithBotContent` preenche só o que
+  o eco não soube gravar — texto placeholder, `tipo` genérico, `reply_meta` ausente — nunca status
+  nem texto real; emite realtime só se mudou algo.
+- Teste: `tests/whapiTriageEcoAntesDoInsert.test.js` (7 casos).
+
+**Dados antigos:** a correção não reescreve linhas já gravadas — reparar por SQL pontual.

@@ -129,6 +129,55 @@ function outboundStatus(sendResult) {
   }
 }
 
+/** Textos que o pipeline de webhook grava quando não conseguiu extrair o conteúdo do eco. */
+const ECHO_PLACEHOLDER_TEXTS = new Set(['', '(mensagem)', '(mensagem vazia)', '(mídia)', '(midia)'])
+
+/**
+ * Corrida eco × insert: a linha do eco já existe (mesmo conversa_id + whatsapp_id).
+ * Preenche só o que o eco não soube gravar — texto placeholder, tipo genérico 'texto',
+ * reply_meta ausente — e NUNCA mexe em status (o eco/ACK pode estar à frente) nem em texto real.
+ * @returns {Promise<{ row: object, changed: boolean }|null>} linha final, ou null se não achou.
+ */
+async function completeEchoRowWithBotContent(sb, { company_id, conversa_id, whatsapp_id, texto, tipo, reply_meta }) {
+  try {
+    const { data: existing, error } = await sb
+      .from('mensagens')
+      .select('*')
+      .eq('company_id', company_id)
+      .eq('conversa_id', conversa_id)
+      .eq('whatsapp_id', whatsapp_id)
+      .eq('direcao', 'out')
+      .maybeSingle()
+    if (error || !existing) return null
+
+    const patch = {}
+    const savedTexto = String(existing.texto ?? '').trim()
+    const textoPlaceholder = ECHO_PLACEHOLDER_TEXTS.has(savedTexto.toLowerCase())
+    if (texto && textoPlaceholder) patch.texto = texto
+    // Tipo/reply_meta só quando o eco ficou genérico (placeholder ou mesmo texto do bot).
+    const ecoDoMesmoConteudo = textoPlaceholder || savedTexto === String(texto || '').trim()
+    if (ecoDoMesmoConteudo && tipo && tipo !== 'texto' && (!existing.tipo || existing.tipo === 'texto')) patch.tipo = tipo
+    if (ecoDoMesmoConteudo && reply_meta && typeof reply_meta === 'object' && existing.reply_meta == null) patch.reply_meta = reply_meta
+    if (Object.keys(patch).length === 0) return { row: existing, changed: false }
+
+    const { data: updated, error: upErr } = await sb
+      .from('mensagens')
+      .update(patch)
+      .eq('id', existing.id)
+      .eq('company_id', company_id)
+      .select('*')
+      .single()
+    if (upErr) {
+      console.warn('[whapiTriage] falha ao completar linha do eco:', upErr.message)
+      return { row: existing, changed: false }
+    }
+    return { row: updated || existing, changed: !!updated }
+  } catch (e) {
+    console.warn('[whapiTriage] completeEchoRowWithBotContent:', e?.message || e)
+    return null
+  }
+}
+
 /** Persiste a bolha outbound do bot (menu/confirmação) e emite realtime. */
 async function insertBotBubble({ sb, company_id, conversa_id, whatsapp_instance_id, texto, sendResult, emitRealtime, tipo = 'texto', reply_meta = null }) {
   const st = outboundStatus(sendResult)
@@ -145,7 +194,17 @@ async function insertBotBubble({ sb, company_id, conversa_id, whatsapp_instance_
     ...(whatsapp_instance_id ? { whatsapp_instance_id } : {}),
   }
   try {
-    const { data, error } = await sb.from('mensagens').insert(row).select('*').single()
+    let { data, error } = await sb.from('mensagens').insert(row).select('*').single()
+    if (error && String(error.code || '') === '23505' && st.traceable) {
+      // O eco `from_me` do Whapi chegou ANTES deste insert e já criou a linha com o mesmo
+      // whatsapp_id — às vezes só com o placeholder '(mensagem)'. Antes o insert era descartado
+      // e a bolha do menu ficava "Mensagem" para sempre. Completa a linha do eco.
+      const echo = await completeEchoRowWithBotContent(sb, { company_id, conversa_id, whatsapp_id: st.messageId, texto, tipo, reply_meta })
+      // Eco já estava completo: a bolha já foi anunciada pelo webhook — não reemite.
+      if (echo && !echo.changed) return echo.row
+      data = echo?.row || null
+      error = data ? null : error
+    }
     if (error) {
       console.warn('[whapiTriage] falha ao gravar bolha outbound (WhatsApp pode ter recebido):', error.message)
       return null
@@ -337,5 +396,5 @@ module.exports = {
   resetWhapiTriageStateForConversa,
   handleWhapiTriageInbound,
   resolveSelectedOption,
-  _internal: { normLabel, outboundStatus },
+  _internal: { normLabel, outboundStatus, insertBotBubble, completeEchoRowWithBotContent },
 }

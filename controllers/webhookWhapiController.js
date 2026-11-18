@@ -481,6 +481,25 @@ function extractInteractiveReply(m) {
 }
 
 /**
+ * Texto do corpo de uma mensagem interativa ENVIADA por nós (menu de lista/botões) que volta
+ * como eco `from_me`. O eco traz `interactive: { header, body: { text }, footer, action }` —
+ * sem `reply`/id/título, então `extractInteractiveReply` devolve null e o eco ficava sem texto
+ * → '(mídia)' → '(mensagem)'. Se o eco chegar antes da triagem gravar a própria bolha, era
+ * esse placeholder que aparecia no chat. Só usado para from_me (inbound segue intocado).
+ */
+function extractSentInteractiveBodyText(m) {
+  const src = m?.interactive
+  if (!src || typeof src !== 'object') return ''
+  const pick = (part) => {
+    if (part == null) return ''
+    if (typeof part === 'string') return part.trim()
+    if (typeof part === 'object' && typeof part.text === 'string') return part.text.trim()
+    return ''
+  }
+  return pick(src.body) || pick(src.header) || ''
+}
+
+/**
  * Extrai o voto de uma enquete inbound. Whapi (INFERÊNCIA — confirmar live): `m.action`
  * (type 'vote') com `votes`/`selected_options` e `target` = id da mensagem da enquete.
  * As opções podem vir como texto (ideal) ou hash/índice. Retorna { target, options: string[] }.
@@ -1065,6 +1084,7 @@ function normalizeWhapiMessageToInternal(m, ctx = {}) {
     || (m.text && (m.text.body ?? m.text))
     || (type === 'link_preview' && (m.link_preview?.body || m.link_preview?.title))
     || (interactiveReply && (interactiveReply.title || interactiveReply.id))
+    || (fromMe && type === 'interactive' && extractSentInteractiveBodyText(m))
     || pollVotePreview
     || (pollMsg && pollPreviewText(pollMsg))
     || orderSummary
@@ -1662,6 +1682,7 @@ exports._test = {
   resolveWhapiEditTargetId,
   extractWhapiEditedTexto,
   extractInteractiveReply,
+  extractSentInteractiveBodyText,
   extractPollVote,
   normalizeWhapiPresence,
   resolvePollVoteLabels,
