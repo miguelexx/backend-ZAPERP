@@ -311,6 +311,8 @@ server.listen(PORT, '0.0.0.0', () => {
     require('./services/ackHealthScheduler').startAckHealthScheduler()
     startTriageRedirectScheduler(io)
     startAguardandoClienteMonitorScheduler(io)
+    // Ranking gamificado (doc 42): abre/encerra ciclos semanais e anuncia o vencedor uma vez.
+    require('./services/rankingGamificado/rankingGamificadoScheduler').startRankingGamificadoScheduler(io)
     const { startDisparoWorker } = require('./workers/disparoWorker')
     startDisparoWorker(io)
     console.log('[WORKER] Disparo worker embutido na API (heartbeat + fila)')

@@ -89,6 +89,7 @@ docs/
 | **Apagar conversa nos dois sentidos (ZapERP ↔ WhatsApp), anti-loop, varredura UltraMSG** | `ai-handoff/34-SINCRONIZACAO-EXCLUSAO-CONVERSA.md` |
 | **Salvar/baixar mídia ("Salvar como…"), Content-Type por bytes, Content-Disposition** | `ai-handoff/35-AUDITORIA-MIDIA-SALVAR-COMO.md` |
 | **Orçamento manual no ERP via API WM (plano de registro, decisões fechadas, o que não tocar)** | `ai-handoff/36-ORCAMENTO-WM-INTEGRACAO.md` |
+| **Ranking gamificado de atendentes (regra de contagem = Supervisão, ciclos, anúncio único)** | `ai-handoff/42-RANKING-GAMIFICADO.md` |
 | **"Mostra enviada mas não foi" — `55` colado em número estrangeiro, `pending` eterno, tique que mente** | `ai-handoff/38-AUDITORIA-ENDERECO-DESTINO-CORROMPIDO.md` |
 | **Contato aparece na busca ("Sem conversa") e dá erro ao abrir — tronco "0" antes do DDD** | `ai-handoff/39-AUDITORIA-CONTATO-NAO-ABRE-CONVERSA.md` |
 | **Gargalos de escala: status que regride, áudio duplicado, ACK na conversa errada, cache/concorrência do inbound e mídia** | `ai-handoff/40-AUDITORIA-ESCALA-GARGALOS-2026-11-09.md` |

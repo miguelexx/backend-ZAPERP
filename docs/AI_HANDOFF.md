@@ -2,6 +2,8 @@
 
 Sincronização manual da agenda (2026-09-02): [análise, correções e testes](ai-handoff/25-SINCRONIZACAO-MANUAL-CONTATOS.md). Importação inicia por clique; usa fotos e progresso HTTP/Socket. Publicação e agenda real ainda não validadas.
 
+Ranking gamificado de atendentes (2026-11-19): [doc 42](ai-handoff/42-RANKING-GAMIFICADO.md). Conta `atendimentos.acao='encerrou'` por quem encerrou (mesma regra da Supervisão — não criar contador paralelo). Migration `20261119120000` **NÃO aplicada**; código tolera ausência.
+
 Múltiplos números WHAPI por empresa (2026-09-12): [guia da frente](ai-handoff/28-MULTIPLOS-NUMEROS-WHAPI.md). A fundação multi-instância (`whatsapp_instances` + `whatsapp_instance_id` em conversas/mensagens + roteamento por instância) **já existe e é provider-agnóstica** — é finalização/ativação, não projeto novo. Bloqueio #1 = migrations aplicadas + deploy (PENDENTE DE VALIDAÇÃO). Ver doc 28 §5/§7.
 
 > Contexto compacto para IAs começarem sem redescobrir o sistema.  

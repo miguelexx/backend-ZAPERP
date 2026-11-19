@@ -340,6 +340,8 @@ const helpDeskRoutes = require('./routes/helpDeskRoutes')
 const crmSsoRoutes = require('./routes/crmSsoRoutes')
 const disparoRoutes = require('./routes/disparoRoutes')
 const comunidadeRoutes = require('./routes/comunidadeRoutes')
+// Ranking gamificado de atendentes (doc 42) — só sob /api (rota nova, sem alias legado).
+const rankingRoutes = require('./routes/rankingRoutes')
 
 // Webhooks já registrados antes do CORS (evita 403 Origin)
 app.use('/dashboard', apiLimiter, dashboardRoutes)
@@ -405,6 +407,7 @@ api.use('/conversas', minhasPendenciasRoutes)
 api.use('/helpdesk', helpDeskRoutes)
 api.use('/crm', crmSsoRoutes)
 api.use('/disparo', disparoRoutes)
+api.use('/ranking', rankingRoutes)
 app.use('/api', apiLimiter, api)
 
 // =====================================================
