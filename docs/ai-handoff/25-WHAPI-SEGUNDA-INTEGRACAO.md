@@ -1773,3 +1773,35 @@ Mensagem"). Intermitente: a mesma empresa gravou o menu certo 17 min antes (conv
 - Teste: `tests/whapiTriageEcoAntesDoInsert.test.js` (7 casos).
 
 **Dados antigos:** a correção não reescreve linhas já gravadas — reparar por SQL pontual.
+
+## Anúncio "clique para WhatsApp" (Instagram/Facebook Ads) vira cartão (23/11/2026, não deployado)
+
+**Sintoma:** no WhatsApp a mensagem do lead aparece com o cartão do anúncio (criativo + título +
+texto + instagram.com) acima de "Olá! Posso ter mais informações sobre isso?"; no sistema aparecia
+só o texto. **Não é `link_preview`:** é mensagem originada de anúncio (CTWA).
+
+**Contrato (doc Whapi "Incoming message from Facebook Ads"):** `type: 'text'`, texto do cliente em
+`text.body`, anúncio em `context.ad = { title, body, media_type, preview_url, media_url,
+source: { id, type, url }, attrib, ctwa }` (+ `context.conversion { data, source }`). Só vem quando a
+mensagem nasce do clique no anúncio. Antes o normalizador ignorava `context.ad`.
+
+**O que mudou:**
+- `extractWhapiAdMeta(m)` (puro, exportado em `_test`): `context.ad` → `adMeta { title, body,
+  media_type, image, media_url, source_url, source_type, source_id, ctwa }`. Aceita também os nomes do
+  `referral` da Cloud API da Meta e do `externalAdReply`. Só inbound. `image` só se URL/data URI;
+  `source_url`/`media_url` só http(s) (viram `window.open` no front).
+- Texto vazio + anúncio em mensagem de TEXTO → corpo sintético `📣 Anúncio: <título>` e
+  `adMeta.texto_sintetico = true` (senão seria descartado como placeholder; o front não repete). Foto/
+  vídeo sem legenda não ganha o rótulo. Triagem não é afetada (número só no início; setor por
+  igualdade exata).
+- Plumbing igual ao `link_preview`: normalize → `extractMessage` → `applyInboundMediaFields` faz
+  MERGE em `reply_meta.ad` (tipo segue texto).
+- Front: `AdReferralMessage.jsx` + regras puras em `bubble/utils/adReferral.js`. Prioridade:
+  anúncio > link comum.
+
+**Residual:** `preview_url` é CDN da Meta e expira (cartão cai no fundo da marca) — espelhar no R2
+seria outra etapa. "Buscar histórico" (`mapWhapiMessageForSync`) não grava `reply_meta` de nenhum
+cartão (produto, pedido, link, anúncio) — limitação anterior do importador.
+
+**Testes:** `tests/whapiInboundProduto.test.js` (bloco do anúncio, 9 casos); front
+`scripts/test-conversa-bubble.mjs` (classificador + regras do cartão).

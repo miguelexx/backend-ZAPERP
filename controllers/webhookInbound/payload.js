@@ -624,6 +624,8 @@ function extractMessage(payload) {
   // Pré-visualização de link (Whapi type 'link_preview'): o normalizador anexou payload.linkPreviewMeta
   // { url, title, description, preview }. Só repassamos; o texto (body) já foi resolvido acima.
   const linkPreviewMeta = (payload.linkPreviewMeta && typeof payload.linkPreviewMeta === 'object') ? payload.linkPreviewMeta : null
+  // Anúncio "clique para WhatsApp" (Whapi context.ad): o normalizador anexou payload.adMeta. Só repassa.
+  const adMeta = (payload.adMeta && typeof payload.adMeta === 'object') ? payload.adMeta : null
 
   let pollMeta = null
   if (type === 'poll') {
@@ -695,7 +697,8 @@ function extractMessage(payload) {
     pollMeta,
     productMeta,
     orderMeta,
-    linkPreviewMeta
+    linkPreviewMeta,
+    adMeta
   }
 }
 

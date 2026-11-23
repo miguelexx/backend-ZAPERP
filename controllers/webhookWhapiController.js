@@ -968,6 +968,43 @@ async function enrichNormalizedOrder(normalized, ctxSrc) {
   return normalized
 }
 
+/**
+ * Mensagem que veio de um ANÚNCIO "clique para WhatsApp" (Instagram/Facebook Ads). O WhatsApp
+ * mostra acima do texto o cartão do anúncio (criativo + título + texto + origem); a Whapi entrega
+ * esses dados em `context.ad` (doc Whapi "Incoming message from Facebook Ads"):
+ *   { title, body, media_type, preview_url, media_url, source:{ id, type, url }, attrib, ctwa }
+ * O texto do cliente segue em `text.body`. Aceita também os nomes do objeto `referral` da Cloud
+ * API da Meta e do `externalAdReply` (Baileys) — mesmo dado, outro dialeto. Devolve null quando
+ * não há nada exibível. Puro (testável).
+ */
+function extractWhapiAdMeta(m) {
+  if (!m || typeof m !== 'object') return null
+  const ctxObj = (m.context && typeof m.context === 'object') ? m.context : null
+  const raw = [ctxObj?.ad, m.ad, m.referral, ctxObj?.referral, ctxObj?.external_ad_reply, ctxObj?.externalAdReply]
+    .find((v) => v && typeof v === 'object' && !Array.isArray(v))
+  if (!raw) return null
+  const str = (v) => (v != null && String(v).trim() ? String(v).trim() : null)
+  const src = (raw.source && typeof raw.source === 'object') ? raw.source : {}
+  const meta = {
+    title: str(raw.title ?? raw.headline),
+    body: str(raw.body ?? raw.description),
+    media_type: str(raw.media_type ?? raw.mediaType),
+    image: str(raw.preview_url ?? raw.thumbnail_url ?? raw.thumbnailUrl ?? raw.image_url ?? raw.thumbnail),
+    media_url: str(raw.media_url ?? raw.video_url ?? raw.mediaUrl),
+    source_url: str(src.url ?? raw.source_url ?? raw.sourceUrl),
+    source_type: str(src.type ?? raw.source_type ?? raw.sourceType),
+    source_id: str(src.id ?? raw.source_id ?? raw.sourceId),
+    ctwa: str(raw.ctwa ?? raw.ctwa_clid),
+  }
+  // A miniatura precisa ser URL/data URI renderizável; senão some (o cartão cai no fundo de marca).
+  if (meta.image && !/^(https?:\/\/|data:image\/)/i.test(meta.image)) meta.image = null
+  // Os links viram window.open no front: só http(s) — nada de javascript:/data: vindo do payload.
+  if (meta.source_url && !/^https?:\/\//i.test(meta.source_url)) meta.source_url = null
+  if (meta.media_url && !/^https?:\/\//i.test(meta.media_url)) meta.media_url = null
+  if (!meta.title && !meta.body && !meta.image && !meta.source_url) return null
+  return meta
+}
+
 function normalizeWhapiMessageToInternal(m, ctx = {}) {
   if (!m || typeof m !== 'object') return null
   const channelId = ctx.channelId
@@ -1033,6 +1070,14 @@ function normalizeWhapiMessageToInternal(m, ctx = {}) {
         preview: typeof m.link_preview.preview === 'string' ? m.link_preview.preview : null,
       }
     : null
+  // Anúncio "clique para WhatsApp": cartão do anúncio acima do texto (bolha AdReferralMessage).
+  // Se o cliente não digitou nada, o corpo vira um rótulo sintético (senão o inbound sem texto
+  // seria descartado como placeholder) — marcado p/ o front não repetir o título embaixo do cartão.
+  const adMeta = fromMe ? null : extractWhapiAdMeta(m)
+  // Só mensagem de TEXTO ganha o rótulo: numa foto/vídeo sem legenda ele viraria legenda da mídia.
+  const adFallback = (adMeta && (type === 'text' || type === 'link_preview'))
+    ? `📣 Anúncio${adMeta.title ? `: ${adMeta.title}` : ''}`
+    : ''
   // Outros `action` (ex. media_notify) não são mensagem de atendimento — edit/vote/reaction passam.
   if (type === 'action' && !isReaction && !isPollVote && !isEdit) return null
   if (type === 'deleted' || type === 'revoke' || type === 'revoked' || m.deleted === true) return null
@@ -1092,8 +1137,10 @@ function normalizeWhapiMessageToInternal(m, ctx = {}) {
     || m.body
     || m.caption
     || m[type]?.caption
+    || adFallback
     || ''
   )
+  if (adMeta && adFallback && textBody === adFallback) adMeta.texto_sintetico = true
 
   // Mídia por tipo (Fase B faz o download; aqui já mapeamos a URL para não perder o link).
   // GIF (`type: gif`) e vídeo-recado circular (`type: short`, PTV) são MP4 no Whapi: sem este
@@ -1237,6 +1284,7 @@ function normalizeWhapiMessageToInternal(m, ctx = {}) {
     ...(quotedProductRef ? { quotedProductRef } : {}),
     ...(orderRef ? { orderRef } : {}),
     ...(linkPreviewMeta ? { linkPreviewMeta } : {}),
+    ...(adMeta ? { adMeta } : {}),
     isEdit,
   }
 }
@@ -1690,6 +1738,7 @@ exports._test = {
   enrichNormalizedProduct,
   enrichQuotedProduct,
   enrichNormalizedOrder,
+  extractWhapiAdMeta,
   buildWhapiOrderSummary,
   whapiMessageEpochMs,
   whapiInboundIsHistorical,

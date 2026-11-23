@@ -257,7 +257,7 @@ function nomeArquivoDoTexto(texto) {
 function applyInboundMediaFields(insertMsg, media) {
   const {
     type, imageUrl, documentUrl, audioUrl, videoUrl, stickerUrl,
-    locationUrl, locationMeta, contactMeta, pollMeta, productMeta, orderMeta, linkPreviewMeta, fileName, diag = {},
+    locationUrl, locationMeta, contactMeta, pollMeta, productMeta, orderMeta, linkPreviewMeta, adMeta, fileName, diag = {},
   } = media || {}
 
   if (type === 'image' && imageUrl) {
@@ -334,6 +334,11 @@ function applyInboundMediaFields(insertMsg, media) {
   // if/else porque o tipo continua texto; faz MERGE p/ não apagar uma citação já resolvida.
   if (linkPreviewMeta && typeof linkPreviewMeta === 'object' && (linkPreviewMeta.url || linkPreviewMeta.title || linkPreviewMeta.preview)) {
     insertMsg.reply_meta = { ...(insertMsg.reply_meta && typeof insertMsg.reply_meta === 'object' ? insertMsg.reply_meta : {}), link_preview: linkPreviewMeta }
+  }
+  // Anúncio "clique para WhatsApp": a bolha (AdReferralMessage) lê reply_meta.ad { title, body,
+  // image, media_type, source_url, source_type, … }. Mesmo merge do link_preview (tipo segue texto).
+  if (adMeta && typeof adMeta === 'object' && (adMeta.title || adMeta.body || adMeta.image || adMeta.source_url)) {
+    insertMsg.reply_meta = { ...(insertMsg.reply_meta && typeof insertMsg.reply_meta === 'object' ? insertMsg.reply_meta : {}), ad: adMeta }
   }
   // Demais tipos: já têm texto preenchido; tipo padrão é texto (não seta insertMsg.tipo).
   return insertMsg

@@ -384,3 +384,120 @@ describe('Whapi inbound — pré-visualização de link (link_preview)', () => {
     expect(insertMsg.reply_meta).toEqual({ name: 'Você', snippet: 'anterior', link_preview: linkPreviewMeta })
   })
 })
+
+/**
+ * Anúncio "clique para WhatsApp" (Instagram/Facebook Ads). O WhatsApp mostra o cartão do anúncio
+ * (criativo + título + texto + origem) acima da mensagem; antes o sistema mostrava só o texto.
+ * Shape documentado pela Whapi: type 'text' + text.body (texto do cliente) + context.ad
+ * { title, body, media_type, preview_url, media_url, source:{id,type,url}, attrib, ctwa }.
+ */
+describe('Whapi inbound — anúncio clique-para-WhatsApp (context.ad)', () => {
+  const CTX = { channelId: 'HULKBR-NZCYL', connectedPhone: '553498630553' }
+  afterEach(() => jest.resetModules())
+  const ctrl = () => require('../controllers/webhookWhapiController')._test
+
+  const adMsg = (ov = {}) => ({
+    id: 'AD1', from: '553499111111', from_me: false, from_name: 'Silvia', source: 'mobile',
+    type: 'text', chat_id: '553499111111@s.whatsapp.net', timestamp: 1700000000,
+    text: { body: 'Olá! Posso ter mais informações sobre isso?' },
+    context: {
+      conversion: { data: 'TOKEN', source: 'FB_Ads' },
+      ad: {
+        title: 'Eliabedamasceno.imoveis',
+        body: 'VENDA — casa 3 quartos',
+        media_type: 'image',
+        preview_url: 'https://scontent.cdninstagram.com/v/casa.jpg',
+        media_url: 'https://www.facebook.com/ads/x',
+        source: { id: '120200000', type: 'ad', url: 'https://www.instagram.com/p/abc' },
+        attrib: true,
+        ctwa: 'CTWA123',
+      },
+    },
+    ...ov,
+  })
+
+  test('texto do cliente preservado + adMeta com criativo/título/texto/origem', () => {
+    const m = ctrl().normalizeWhapiMessageToInternal(adMsg(), CTX)
+    expect(m.type).toBe('chat')
+    expect(m.body).toBe('Olá! Posso ter mais informações sobre isso?')
+    expect(m.adMeta).toEqual({
+      title: 'Eliabedamasceno.imoveis',
+      body: 'VENDA — casa 3 quartos',
+      media_type: 'image',
+      image: 'https://scontent.cdninstagram.com/v/casa.jpg',
+      media_url: 'https://www.facebook.com/ads/x',
+      source_url: 'https://www.instagram.com/p/abc',
+      source_type: 'ad',
+      source_id: '120200000',
+      ctwa: 'CTWA123',
+    })
+    expect(m.adMeta.texto_sintetico).toBeUndefined()
+    // anúncio não é citação: nada de "Mensagem"/replyToId fantasma
+    expect(m.referenceMessageId).toBeUndefined()
+    expect(m.quotedProductRef).toBeUndefined()
+  })
+
+  test('anúncio sem texto do cliente → corpo sintético (não é descartado) e marcado', () => {
+    const m = ctrl().normalizeWhapiMessageToInternal(adMsg({ text: { body: '' } }), CTX)
+    expect(m.body).toBe('📣 Anúncio: Eliabedamasceno.imoveis')
+    expect(m.adMeta.texto_sintetico).toBe(true)
+  })
+
+  test('aceita o dialeto referral da Meta (headline/source_url/thumbnail_url)', () => {
+    const meta = ctrl().extractWhapiAdMeta({
+      referral: { headline: 'Casa à venda', body: 'Centro', thumbnail_url: 'https://x/t.jpg', source_url: 'https://fb.me/abc', source_type: 'ad', source_id: '9', ctwa_clid: 'C' },
+    })
+    expect(meta).toMatchObject({ title: 'Casa à venda', body: 'Centro', image: 'https://x/t.jpg', source_url: 'https://fb.me/abc', source_type: 'ad', source_id: '9', ctwa: 'C' })
+  })
+
+  test('sem context.ad, ou ad vazio, ou mensagem nossa (from_me) → sem adMeta', () => {
+    const c = ctrl()
+    expect(c.normalizeWhapiMessageToInternal(adMsg({ context: undefined }), CTX).adMeta).toBeUndefined()
+    expect(c.extractWhapiAdMeta({ context: { ad: { attrib: true } } })).toBeNull()
+    expect(c.normalizeWhapiMessageToInternal(adMsg({ from_me: true }), CTX).adMeta).toBeUndefined()
+  })
+
+  test('foto vinda de anúncio sem legenda NÃO ganha o rótulo como legenda (só texto ganha)', () => {
+    const m = ctrl().normalizeWhapiMessageToInternal(adMsg({
+      type: 'image', text: undefined, image: { link: 'https://cdn/x.jpg', mime_type: 'image/jpeg' },
+    }), CTX)
+    expect(m.adMeta).toBeTruthy()
+    expect(m.body).not.toContain('Anúncio')
+    expect(m.adMeta.texto_sintetico).toBeUndefined()
+  })
+
+  test('links que não são http(s) são descartados (o front faz window.open neles)', () => {
+    const meta = ctrl().extractWhapiAdMeta({ context: { ad: {
+      title: 'T', source: { url: 'javascript:alert(1)' }, media_url: 'data:text/html,x',
+    } } })
+    expect(meta.source_url).toBeNull()
+    expect(meta.media_url).toBeNull()
+    expect(meta.title).toBe('T')
+  })
+
+  test('miniatura que não é URL/data URI é descartada (cartão cai no fundo da marca)', () => {
+    const meta = ctrl().extractWhapiAdMeta({ context: { ad: { title: 'T', preview_url: 'not-a-url' } } })
+    expect(meta.image).toBeNull()
+    expect(meta.title).toBe('T')
+  })
+
+  test('extractMessage repassa adMeta e mantém o texto do cliente', () => {
+    const { extractMessage } = require('../controllers/webhookInbound/payload')
+    const adMeta = { title: 'T', body: 'B', image: 'https://i/x.jpg', source_url: 'https://instagram.com/p/a' }
+    const ex = extractMessage({
+      type: 'ReceivedCallback', msgType: 'chat', id: 'AD1', phone: '553499111111',
+      message: 'Olá!', text: { message: 'Olá!' }, timestamp: 1700000000, adMeta,
+    })
+    expect(ex.adMeta).toEqual(adMeta)
+    expect(ex.texto).toBe('Olá!')
+  })
+
+  test('applyInboundMediaFields: adMeta → reply_meta.ad (merge, não apaga o que já havia)', () => {
+    const { applyInboundMediaFields } = require('../controllers/webhookInbound/persistMensagem')
+    const adMeta = { title: 'T', body: 'B', image: 'https://i/x.jpg', source_url: 'https://instagram.com/p/a' }
+    const insertMsg = { texto: 'Olá!', reply_meta: { name: 'Você', snippet: 'anterior' } }
+    applyInboundMediaFields(insertMsg, { type: 'text', adMeta })
+    expect(insertMsg.reply_meta).toEqual({ name: 'Você', snippet: 'anterior', ad: adMeta })
+    expect(insertMsg.tipo).toBeUndefined() // continua mensagem de texto
+  })
+})
