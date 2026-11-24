@@ -45,3 +45,11 @@ Estados detalhados de Disparo: campanha `rascunho/configurando/pronta/agendada/e
 - Assumir dentro do envio (`conversationPolicy` → `linhaRealtimeAssumirNoEnvio`) emite a linha SEM `aguardando_cliente_desde: null`: o envio emite o estado final logo depois; o `null` intermediário fazia o card piscar "Em atendimento".
 - `executarAssumirConversa` encerra `aguardando_resposta_campanha` (best-effort, coluna opcional): conversa de campanha assumida (botão ou 1.º envio) ia para fora da Minha fila com o card "Disparo enviado" e a 1.ª resposta do cliente a redistribuía ao responsável da campanha.
 - Testes: `absenceFinalizationService`, `conversaAssumirInternoService` (espera de campanha), `aguardandoClientePayloadEnvio`.
+
+### Co-atendimento: quem remove + realtime para todos (24/11/2026)
+
+`controllers/chat/attendanceController.js` (testes: `tests/coAtendenteRemoverPermissao.test.js`):
+- **`DELETE /chats/:id/atendentes/:usuario_id`** agora exige: admin/supervisor, o responsável principal, quem incluiu a pessoa (`conversa_atendentes.adicionado_por`) ou a própria pessoa (sair). Antes bastava ter visibilidade da conversa (ex.: mesmo setor) para tirar qualquer co-atendente de um atendimento alheio → 403.
+- **Add e remove emitem `conversa_participantes_atualizados`** via `emitirParaUsuariosQuePodemVerConversa` (try/catch — nunca derruba o HTTP). Antes só o incluído/removido recebia evento; o responsável/supervisor com o modal aberto ficava com a lista velha. O frontend já escutava esse evento (`useConversaParticipantes`), mas ninguém o emitia.
+- Erro de insert não-mapeado não devolve mais `insertError.message` cru ao cliente (loga no servidor).
+- Sem migration.

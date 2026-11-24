@@ -861,6 +861,33 @@ exports.transferirChat = async (req, res) => {
 // =====================================================
 // participantes do atendimento (nao transfere atendente principal)
 // =====================================================
+
+function podeRemoverCoAtendente({ perfil, user_id, conv, participante, uidRemover }) {
+  if (['admin', 'supervisor'].includes(String(perfil || '').toLowerCase())) return true
+  const uid = Number(user_id)
+  if (uidRemover === uid) return true
+  if (conv?.atendente_id != null && Number(conv.atendente_id) === uid) return true
+  if (participante?.adicionado_por != null && Number(participante.adicionado_por) === uid) return true
+  return false
+}
+
+/**
+ * Avisa TODOS que veem a conversa (e quem está com ela aberta) que a lista de
+ * atendentes mudou. Antes só o incluído/removido recebia evento: o responsável
+ * e o supervisor com o modal aberto ficavam com a lista velha até reabrir.
+ * Nunca derruba a resposta HTTP — a mudança já está gravada.
+ */
+async function emitirParticipantesAtualizados(io, company_id, conversa_id, motivo) {
+  try {
+    await emitirParaUsuariosQuePodemVerConversa(io, company_id, conversa_id, 'conversa_participantes_atualizados', {
+      conversa_id: Number(conversa_id),
+      company_id: Number(company_id),
+      motivo,
+    })
+  } catch (err) {
+    console.warn('[conversa_participantes_atualizados] realtime:', err?.message || err)
+  }
+}
 exports.listarAtendentesDisponiveisConversa = async (req, res) => {
   try {
     const { company_id, id: user_id, perfil, departamento_ids = [] } = req.user
@@ -998,7 +1025,7 @@ exports.removerAtendenteConversa = async (req, res) => {
     // Verifica se existe participação ativa
     const { data: participante } = await supabase
       .from('conversa_atendentes')
-      .select('id')
+      .select('id, adicionado_por')
       .eq('company_id', Number(company_id))
       .eq('conversa_id', Number(conversa_id))
       .eq('usuario_id', uidRemover)
@@ -1007,6 +1034,14 @@ exports.removerAtendenteConversa = async (req, res) => {
 
     if (!participante) {
       return res.status(404).json({ error: 'Participante não encontrado nesta conversa' })
+    }
+
+    // Quem pode tirar alguém do atendimento: admin/supervisor, o responsável
+    // principal, quem incluiu essa pessoa, ou a própria pessoa (sair).
+    // Antes bastava ter visibilidade da conversa (ex.: mesmo setor) para
+    // remover qualquer co-atendente — inclusive de um atendimento alheio.
+    if (!podeRemoverCoAtendente({ perfil, user_id, conv: perm.conv, participante, uidRemover })) {
+      return res.status(403).json({ error: 'Só o responsável, quem incluiu o co-atendente ou um supervisor pode removê-lo.' })
     }
 
     // Soft-delete: marca como inativo com timestamp e quem removeu
@@ -1067,6 +1102,7 @@ exports.removerAtendenteConversa = async (req, res) => {
       emitirParaUsuario(io, uidRemover, 'conversa_atendente_removido', payload)
       emitirConversaAtualizada(io, company_id, conversa_id, { id: Number(conversa_id), company_id: Number(company_id) })
       emitirSincronizacaoListaConversas(io, company_id, conversa_id)
+      await emitirParticipantesAtualizados(io, company_id, conversa_id, 'removido')
     }
 
     return res.json({ ok: true })
@@ -1225,7 +1261,8 @@ exports.adicionarAtendenteConversa = async (req, res) => {
       if (String(insertError?.code || '') === 'P0001') {
         return res.status(409).json({ error: insertError.message })
       }
-      return res.status(500).json({ error: insertError.message })
+      console.error('[adicionarAtendenteConversa] insert:', insertError?.code, insertError?.message)
+      return res.status(500).json({ error: 'Erro ao adicionar atendente. Tente novamente.' })
     }
 
     const { data: fromUser } = await supabase
@@ -1261,6 +1298,7 @@ exports.adicionarAtendenteConversa = async (req, res) => {
       emitirParaUsuario(io, usuario_id, 'conversa_atendente_adicionado', payload)
       emitirConversaAtualizada(io, company_id, conversa_id, { id: Number(conversa_id), company_id: Number(company_id) })
       emitirSincronizacaoListaConversas(io, company_id, conversa_id)
+      await emitirParticipantesAtualizados(io, company_id, conversa_id, 'adicionado')
     }
 
     return res.status(201).json({
