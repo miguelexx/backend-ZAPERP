@@ -370,6 +370,12 @@ function buildWaitingForClientAfterOutboundPatch(conv, autorUsuarioIdOpt, aguard
   if (!conv || !aguardandoDesde) return null
   const status = String(conv.status_atendimento || '').trim().toLowerCase()
   if (status === 'fechada' || status === 'encerrada' || status === 'finalizada') return null
+  // Estados de atendimento com regra própria NÃO são rebaixados para em_atendimento por um envio:
+  // - aguardando_cliente (manual, com prazo/alarme): já espera o cliente; virar em_atendimento
+  //   apagava o alarme e as etiquetas por tempo a cada follow-up do atendente;
+  // - pagamento_pendente / em_atraso (Financeiro): o lembrete de cobrança tirava a conversa do
+  //   filtro de cobrança. O "aguardando cliente" deles já é derivado da última mensagem.
+  if (status === 'aguardando_cliente' || status === 'pagamento_pendente' || status === 'em_atraso') return null
 
   const uid = autorUsuarioIdOpt != null ? Number(autorUsuarioIdOpt) : NaN
   const hasHumanUser = Number.isFinite(uid) && uid > 0
@@ -399,13 +405,16 @@ async function tryMarkWaitingAfterHumanOutbound({ company_id, conversa_id, texto
   const isGroup =
     String(conv?.tipo || '').toLowerCase() === 'grupo' || String(conv?.telefone || '').includes('@g.us')
   if (!conv || isGroup) return { marked: false, reason: 'not_eligible_conversation' }
+  // Valor real gravado: o realtime do envio o repassa quando NÃO marca, para o frontend
+  // corrigir na hora um "Aguardando cliente" que ele tenha previsto de forma otimista.
+  const aguardandoAtual = conv.aguardando_cliente_desde ?? null
   const waitingPatch = buildWaitingForClientAfterOutboundPatch(conv, autor_usuario_id, ts)
   if (!waitingPatch) {
-    return { marked: false, reason: 'not_in_human_attendance' }
+    return { marked: false, reason: 'not_in_human_attendance', aguardando_cliente_desde_atual: aguardandoAtual }
   }
   const { triageMerged, absence: absenceCfg } = await loadChatbotTriageMergeAndAbsence(company_id)
   if (!outboundQualificaParaAguardandoCliente(texto, autor_usuario_id, triageMerged, absenceCfg, { permitirConteudoSemTexto: permitir_conteudo_sem_texto })) {
-    return { marked: false, reason: 'message_not_qualified' }
+    return { marked: false, reason: 'message_not_qualified', aguardando_cliente_desde_atual: aguardandoAtual }
   }
   const jaAguardando = !!conv.aguardando_cliente_desde
   await supabase

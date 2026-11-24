@@ -143,3 +143,58 @@ describe('encerrarChat — mensagem de finalização', () => {
     expect(res.json).toHaveBeenCalledWith(expect.objectContaining({ ok: true }))
   })
 })
+
+describe('encerrarChat — escolha do atendente pela seta do "Encerrar"', () => {
+  const { getChatbotConfig } = require('../services/chatbotTriageService')
+  const reqCom = (body) => ({ ...req(), body })
+
+  test('sem escolha no corpo: segue o toggle (ligado → envia)', async () => {
+    await encerrarChat(reqCom({}), response())
+    expect(mockSendText).toHaveBeenCalledTimes(1)
+  })
+
+  test('sem escolha no corpo e toggle desligado: não envia (comportamento antigo)', async () => {
+    getChatbotConfig.mockResolvedValueOnce({ enviarMensagemFinalizacao: false, mensagemFinalizacao: 'Tchau {{protocolo}}' })
+    await encerrarChat(reqCom(undefined), response())
+    expect(mockSendText).not.toHaveBeenCalled()
+  })
+
+  test('enviar_mensagem_finalizacao=false: encerra sem mensagem mesmo com toggle ligado', async () => {
+    const res = response()
+    await encerrarChat(reqCom({ enviar_mensagem_finalizacao: false }), res)
+    expect(mockSendText).not.toHaveBeenCalled()
+    expect(inserts.length).toBe(0)
+    expect(res.json).toHaveBeenCalledWith(expect.objectContaining({ ok: true }))
+  })
+
+  test('enviar_mensagem_finalizacao=true: envia mesmo com toggle desligado', async () => {
+    getChatbotConfig.mockResolvedValueOnce({ enviarMensagemFinalizacao: false, mensagemFinalizacao: 'Tchau {{protocolo}}' })
+    await encerrarChat(reqCom({ enviar_mensagem_finalizacao: true }), response())
+    expect(mockSendText).toHaveBeenCalledTimes(1)
+    expect(mockSendText.mock.calls[0][2].referenceId).toBe('crm-901')
+  })
+
+  test('valor estranho no corpo é ignorado (segue o toggle)', async () => {
+    getChatbotConfig.mockResolvedValueOnce({ enviarMensagemFinalizacao: false, mensagemFinalizacao: 'Tchau' })
+    await encerrarChat(reqCom({ enviar_mensagem_finalizacao: 'sim' }), response())
+    expect(mockSendText).not.toHaveBeenCalled()
+  })
+})
+
+describe('GET /chats/finalizacao-config', () => {
+  const { getChatbotConfig } = require('../services/chatbotTriageService')
+  const { getFinalizacaoConfig } = require('../controllers/chat/attendanceController')
+
+  test('devolve só o booleano do toggle (sem texto da mensagem)', async () => {
+    const res = response()
+    await getFinalizacaoConfig(req(), res)
+    expect(res.json).toHaveBeenCalledWith({ envio_automatico: true })
+  })
+
+  test('sem config da empresa → false', async () => {
+    getChatbotConfig.mockResolvedValueOnce(null)
+    const res = response()
+    await getFinalizacaoConfig(req(), res)
+    expect(res.json).toHaveBeenCalledWith({ envio_automatico: false })
+  })
+})

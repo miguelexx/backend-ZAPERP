@@ -167,3 +167,47 @@ describe('executarAssumirConversa — conversa encerrada', () => {
     expect(result).toMatchObject({ ok: true, status: 200 })
   })
 })
+
+describe('executarAssumirConversa — espera de campanha', () => {
+  beforeEach(() => jest.clearAllMocks())
+
+  const CONV_CAMPANHA = { ...CONV_FECHADA, status_atendimento: 'aberta' }
+
+  test('assumir conversa que aguardava resposta de campanha encerra a espera', async () => {
+    const assumida = { ...CONV_CAMPANHA, atendente_id: 4, status_atendimento: 'em_atendimento', aguardando_resposta_campanha: true }
+    const limpar = mockChain({ data: null, error: null })
+    supabase.from
+      .mockReturnValueOnce(mockChain({ data: CONV_CAMPANHA, error: null }))
+      .mockReturnValueOnce(mockChain({ data: { limite_chats_por_atendente: 0 }, error: null }))
+      .mockReturnValueOnce(mockChain({ data: assumida, error: null }))
+      .mockReturnValueOnce(limpar)
+    const result = await executarAssumirConversa({ company_id: 10, conversa_id: 77, user_id: 4, perfil: 'atendente' })
+    expect(result.ok).toBe(true)
+    expect(limpar.update).toHaveBeenCalledWith({ aguardando_resposta_campanha: false })
+    expect(limpar.eq).toHaveBeenCalledWith('aguardando_resposta_campanha', true)
+    // O realtime do assumir usa esta linha: ela já sai sem a espera de campanha.
+    expect(result.conversa.aguardando_resposta_campanha).toBe(false)
+  })
+
+  test('conversa sem campanha não faz UPDATE extra', async () => {
+    const assumida = { ...CONV_CAMPANHA, atendente_id: 4, status_atendimento: 'em_atendimento', aguardando_resposta_campanha: false }
+    supabase.from
+      .mockReturnValueOnce(mockChain({ data: CONV_CAMPANHA, error: null }))
+      .mockReturnValueOnce(mockChain({ data: { limite_chats_por_atendente: 0 }, error: null }))
+      .mockReturnValueOnce(mockChain({ data: assumida, error: null }))
+    const result = await executarAssumirConversa({ company_id: 10, conversa_id: 77, user_id: 4, perfil: 'atendente' })
+    expect(result.ok).toBe(true)
+    expect(supabase.from).toHaveBeenCalledTimes(3)
+  })
+
+  test('instalação sem a coluna de campanha não falha o assumir', async () => {
+    const assumida = { ...CONV_CAMPANHA, atendente_id: 4, status_atendimento: 'em_atendimento', aguardando_resposta_campanha: true }
+    supabase.from
+      .mockReturnValueOnce(mockChain({ data: CONV_CAMPANHA, error: null }))
+      .mockReturnValueOnce(mockChain({ data: { limite_chats_por_atendente: 0 }, error: null }))
+      .mockReturnValueOnce(mockChain({ data: assumida, error: null }))
+      .mockReturnValueOnce(mockChain({ data: null, error: { message: 'column "aguardando_resposta_campanha" does not exist' } }))
+    const result = await executarAssumirConversa({ company_id: 10, conversa_id: 77, user_id: 4, perfil: 'atendente' })
+    expect(result.ok).toBe(true)
+  })
+})

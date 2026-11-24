@@ -351,6 +351,7 @@ exports.buscarMensagensConversa = _messageReadController.buscarMensagensConversa
 const _attendanceController = require('./chat/attendanceController')
 exports.assumirChat = _attendanceController.assumirChat
 exports.encerrarChat = _attendanceController.encerrarChat
+exports.getFinalizacaoConfig = _attendanceController.getFinalizacaoConfig
 exports.reabrirChat = _attendanceController.reabrirChat
 exports.marcarLidaModoSimplesChat = _attendanceController.marcarLidaModoSimplesChat
 exports.marcarAguardandoClienteManualChat = _attendanceController.marcarAguardandoClienteManualChat

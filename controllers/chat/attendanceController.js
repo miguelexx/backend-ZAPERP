@@ -68,6 +68,35 @@ exports.assumirChat = async (req, res) => {
 // =====================================================
 // encerrar / reabrir (padronizado)
 // =====================================================
+/**
+ * Escolha explícita do atendente sobre a mensagem de finalização (seta do botão "Encerrar").
+ * Só `true`/`false` (ou as strings equivalentes) contam; qualquer outra coisa = "seguir o padrão".
+ * @returns {true|false|null}
+ */
+function parseEscolhaMensagemFinalizacao(body) {
+  const v = body && typeof body === 'object' ? body.enviar_mensagem_finalizacao : undefined
+  if (v === true || v === 'true') return true
+  if (v === false || v === 'false') return false
+  return null
+}
+
+/**
+ * GET /chats/finalizacao-config — o mínimo que a seta do "Encerrar" precisa para marcar qual
+ * opção é o padrão da empresa. Devolve só um booleano (nada do texto da mensagem): a config
+ * completa (`/ia/config`) é restrita a supervisor/admin, e o atendente comum também encerra.
+ */
+exports.getFinalizacaoConfig = async (req, res) => {
+  try {
+    const { company_id } = req.user
+    const { getChatbotConfig } = require('../../services/chatbotTriageService')
+    const config = await getChatbotConfig(company_id)
+    return res.json({ envio_automatico: !!config?.enviarMensagemFinalizacao })
+  } catch (err) {
+    console.warn('[getFinalizacaoConfig]', err?.message || err)
+    return res.json({ envio_automatico: false })
+  }
+}
+
 exports.encerrarChat = async (req, res) => {
   try {
     const { company_id, id: user_id, perfil, departamento_ids = [] } = req.user
@@ -219,15 +248,25 @@ exports.encerrarChat = async (req, res) => {
       emitirSincronizacaoListaConversas(io, company_id, conversa_id)
     }
 
-    // Enviar mensagem de finalização se configurado no chatbot de triagem
+    // Mensagem de finalização. Padrão: segue o toggle de Configurações (chatbot de triagem).
+    // A seta do botão "Encerrar" permite ao atendente decidir NESTE encerramento:
+    //   body.enviar_mensagem_finalizacao === true  → envia (texto configurado; sem registro, o padrão)
+    //   body.enviar_mensagem_finalizacao === false → encerra sem mensagem
+    //   ausente / outro valor                      → comportamento antigo (segue o toggle)
+    const escolhaMensagem = parseEscolhaMensagemFinalizacao(req.body)
     const atendimentoEncerrou = resultAt.atendimento
-    if (atendimentoEncerrou?.id) {
+    if (atendimentoEncerrou?.id && escolhaMensagem !== false) {
       try {
-        const { getChatbotConfig, buildMensagemFinalizacao } = require('../../services/chatbotTriageService')
+        const triage = require('../../services/chatbotTriageService')
+        const { getChatbotConfig, buildMensagemFinalizacao } = triage
         const config = await getChatbotConfig(company_id)
-        if (config?.enviarMensagemFinalizacao && config?.mensagemFinalizacao) {
+        const textoModelo = String(
+          config?.mensagemFinalizacao || triage.DEFAULT_CHATBOT_CONFIG?.mensagemFinalizacao || ''
+        ).trim()
+        const deveEnviar = escolhaMensagem === true ? true : !!config?.enviarMensagemFinalizacao
+        if (deveEnviar && textoModelo) {
           const { data: usu } = await supabase.from('usuarios').select('nome').eq('id', user_id).maybeSingle()
-          const msg = buildMensagemFinalizacao(config.mensagemFinalizacao, {
+          const msg = buildMensagemFinalizacao(textoModelo, {
             protocolo: atendimentoEncerrou.id,
             nome_atendente: usu?.nome || ''
           })

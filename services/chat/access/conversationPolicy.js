@@ -108,6 +108,19 @@ function podeAssumirConversaPorPerfil(role) {
   return r === 'admin' || r === 'supervisor' || r === 'atendente'
 }
 
+/**
+ * Linha do realtime do assumir quando ele acontece DENTRO de um envio (1.º envio manual).
+ * O envio, seguido, marca "aguardando cliente" e emite o estado final. Emitir aqui
+ * `aguardando_cliente_desde: null` fazia o card/cabeçalho piscar "Em atendimento" entre a
+ * previsão otimista do frontend e o realtime do envio — então a chave sai quando é null
+ * (quem recebe mantém o que tem; o realtime do envio traz o valor real logo depois).
+ */
+function linhaRealtimeAssumirNoEnvio(row) {
+  if (!row || typeof row !== 'object' || row.aguardando_cliente_desde != null) return row
+  const { aguardando_cliente_desde: _omit, ...semAguardando } = row
+  return semAguardando
+}
+
 async function assertPodeEnviarMensagem({
   company_id,
   conversa_id,
@@ -188,7 +201,7 @@ async function assertPodeEnviarMensagem({
       })
       if (result.ok && result.conversa) {
         if (io) {
-          emitirRealtimeAposAssumir(io, company_id, conversa_id, user_id, result.conversa)
+          emitirRealtimeAposAssumir(io, company_id, conversa_id, user_id, linhaRealtimeAssumirNoEnvio(result.conversa))
           if (result.atendimento) {
             await emitirMovimentacaoInternaAtendimento(io, {
               company_id,
@@ -242,7 +255,7 @@ async function assertPodeEnviarMensagem({
       if (!result.ok) return { ok: false, status: result.status, error: result.error }
 
       if (io) {
-        emitirRealtimeAposAssumir(io, company_id, conversa_id, user_id, result.conversa)
+        emitirRealtimeAposAssumir(io, company_id, conversa_id, user_id, linhaRealtimeAssumirNoEnvio(result.conversa))
         if (result.atendimento) {
           await emitirMovimentacaoInternaAtendimento(io, {
             company_id,
@@ -302,4 +315,5 @@ module.exports = {
   podeAssumirConversaPorPerfil,
   assertPodeEnviarMensagem,
   assertPodeReagirMensagem,
+  linhaRealtimeAssumirNoEnvio,
 }

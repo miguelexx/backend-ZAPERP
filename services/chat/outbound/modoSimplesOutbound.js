@@ -12,6 +12,15 @@ const { emitirConversaAtualizada } = require('../realtime/chatRealtimeGateway')
 
 function aplicarAguardandoClienteNoPayload(payload, waitingResult, modoSimplesOpt) {
   if (!payload || !waitingResult?.marked) {
+    // Não marcou: repassa o valor gravado (pode ser null) para o realtime desfazer uma
+    // previsão otimista de "Aguardando cliente" (ex.: atendente digitou a msg de ausência).
+    if (
+      payload &&
+      waitingResult &&
+      Object.prototype.hasOwnProperty.call(waitingResult, 'aguardando_cliente_desde_atual')
+    ) {
+      payload.aguardando_cliente_desde = waitingResult.aguardando_cliente_desde_atual
+    }
     return aplicarModoSimplesNoPayload(payload, modoSimplesOpt, modoSimplesOpt?.atendimento_modo_simples)
   }
   payload.status_atendimento = 'em_atendimento'

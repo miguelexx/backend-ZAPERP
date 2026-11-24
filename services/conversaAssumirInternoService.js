@@ -5,6 +5,34 @@ const { clearReabertaFaltaInteracao } = require('../helpers/reabertaFaltaInterac
 const { resetAlertaSemRespostaAoAssumirReaberta } = require('./atendimentoSemRespostaService')
 
 /**
+ * Assumir = um humano passou a cuidar da conversa. Se ela ainda estava "aguardando resposta de
+ * campanha" (Disparo), a espera acaba aqui: sem isto a conversa assumida (inclusive pelo envio
+ * de um atendente que achou o contato na busca) ficava fora da Minha fila/Em atendimento, com o
+ * card "Disparo enviado", e a 1.ª resposta do cliente a redistribuía para o responsável da
+ * campanha — tirando-a de quem já estava atendendo. Best-effort em UPDATE separado: a coluna
+ * não existe em instalações sem o módulo, e isso não pode falhar o assumir.
+ */
+async function encerrarEsperaDeCampanhaAoAssumir(company_id, conversa_id, row) {
+  if (row && row.aguardando_resposta_campanha !== true) return
+  try {
+    const { error } = await supabase
+      .from('conversas')
+      .update({ aguardando_resposta_campanha: false })
+      .eq('company_id', company_id)
+      .eq('id', conversa_id)
+      .eq('aguardando_resposta_campanha', true)
+    if (error) {
+      if (!/column|schema cache/i.test(String(error.message || ''))) {
+        console.warn('[assumir] limpar aguardando_resposta_campanha:', error.message)
+      }
+      return
+    }
+    // A linha devolvida alimenta o realtime do assumir: ela tem de refletir a mudança.
+    if (row) row.aguardando_resposta_campanha = false
+  } catch (_) { /* best-effort */ }
+}
+
+/**
  * Mesma regra de POST /chats/:id/assumir — atualiza conversa e registra atendimento.
  * Emissões Socket.io ficam no caller (chatController ou clienteController).
  */
@@ -138,6 +166,7 @@ async function executarAssumirConversa({
   }
 
   await clearReabertaFaltaInteracao(company_id, conversa_id)
+  await encerrarEsperaDeCampanhaAoAssumir(company_id, conversa_id, data)
 
   const resultAt = await registrarAtendimento({
     conversa_id,

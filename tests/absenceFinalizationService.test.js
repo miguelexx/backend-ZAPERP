@@ -112,6 +112,19 @@ describe('absenceFinalizationService - configuracao por empresa', () => {
     expect(patch).not.toHaveProperty('atendente_id')
   })
 
+  it.each(['aguardando_cliente', 'pagamento_pendente', 'em_atraso'])(
+    'nao rebaixa %s para em_atendimento quando o atendente envia',
+    (status) => {
+      expect(
+        buildWaitingForClientAfterOutboundPatch(
+          { status_atendimento: status, atendente_id: 77 },
+          77,
+          '2026-11-24T12:00:00.000Z'
+        )
+      ).toBeNull()
+    }
+  )
+
   it('nao reabre conversa fechada para aguardando cliente', () => {
     expect(
       buildWaitingForClientAfterOutboundPatch(
