@@ -1920,6 +1920,8 @@ exports.receberZapi = async (req, res) => {
                   sendMessage,
                   emitRealtime: emitAutomacaoRealtime || null,
                   mensagemClienteCriadoEm: criado_em || null,
+                  // Fora do horário: reaberta agora = ciclo novo (fala antiga do atendente não conta).
+                  conversaReabertaAposFinalizacao,
                 })
                 // fallbackToText → deixa o chatbot de texto assumir; senão o módulo Whapi é o dono.
                 if (!wr?.fallbackToText) skipChatbot = true

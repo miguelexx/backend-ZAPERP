@@ -75,3 +75,33 @@ e o voto de enquete (`pollVoteOptions`) — nada mudou lá.
 - `getActiveWhapiTriageConfig` retorna null para UltraMSG / módulo off / migration pendente → o seam é no-op.
 - Suítes críticas verdes após o edit: `receberZapiContract`, `receberZapiInbound`, `chatbotTriage*`,
   `chatbotInboundGuard`, `providerRouting`, `webhookZapiPure` (120) + `whapiTriage` (7).
+
+## 2026-11-24 — Mensagem fora do horário com a triagem interativa ligada
+
+**Bug:** com o módulo ligado, o webhook marca `skipChatbot = true` e o chatbot de texto não roda —
+e a mensagem fora do horário/almoço (seção 4 do Chatbot de Triagem) morava DENTRO dele. Cliente
+escrevia às 22h e recebia o menu interativo, nunca o aviso.
+
+**Regra agora:** um único ponto de envio, `handleForaHorarioInbound` (em `chatbotTriageService.js`),
+usado pelo chatbot de texto E por `handleWhapiTriageInbound` (via `aplicarForaHorario`). A config
+(horário, UF/fuso, almoço, dias, feriados, mensagem) continua só no `chatbot_triage` — o módulo Whapi
+não tem config de horário própria. Decisão pura em `avaliarForaHorario(config, now)`.
+
+- Fora do expediente / almoço: envia o aviso e **não** envia o menu (igual ao chatbot de texto).
+- Exceção Whapi: cliente que **tocou numa opção** de um menu recebido ainda no expediente tem a
+  escolha respeitada (aviso primeiro, depois transferência + confirmação). Sem isso o toque se perdia
+  e o menu, já marcado como enviado, não era reenviado.
+- Dedup/cooldown/máx. 24h/lock são os mesmos (`bot_logs.tipo='fora_horario'`, `detalhes.origem`
+  diz `whapi_triage` ou `chatbot_triage`). Envio passa pelo `createTriageSendGuard`.
+
+**Bug 2 (vale para os dois caminhos):** `hasHumanIntervenedRecently` sem âncora de menu olhava a última
+`out` das 40 mensagens — numa conversa **reaberta** (bot_logs apagados no reset) era a fala do
+atendente do atendimento antigo → "humano interveio" → aviso calado para todo cliente que volta.
+Agora: conversa reaberta neste inbound (`conversaReabertaAposFinalizacao`, repassado também à triagem
+Whapi) pula a checagem; fora isso só conta fala humana das últimas 6 h (`FORA_HORARIO_HUMANO_JANELA_MS`).
+A checagem da "opção inválida" não mudou (não passa `sinceMs`).
+
+**Extra:** `insertBotOutboundMensagem` trata 23505 com `whatsapp_id` (eco Whapi chegou antes do insert)
+como "já gravado", sem log de erro falso.
+
+Testes: `tests/foraHorarioTriagemInterativa.test.js` (20). Sem migration.

@@ -21,6 +21,8 @@ const {
   wasMenuSentForConversa,
   wasOptionSelectedForConversa,
   isInboundTooOldForWelcome,
+  getChatbotConfig,
+  handleForaHorarioInbound,
 } = require('../chatbotTriageService')
 const { sendWhapiTriageMenu, buildPollPayload, buildTriageReplyMeta, activeSorted } = require('./whapiTriageRenderer')
 const { mapProviderSendResult } = require('../chat/outbound/providerResultMapper')
@@ -220,6 +222,42 @@ async function insertBotBubble({ sb, company_id, conversa_id, whatsapp_instance_
 }
 
 /**
+ * Mensagem fora do horário comercial / pausa de almoço com a Triagem Interativa ligada.
+ * A config (horário, fuso, mensagem) é a mesma da seção 4 do Chatbot de Triagem — este módulo
+ * só a aplica, pelo mesmo handleForaHorarioInbound do chatbot de texto (dedup/cooldown/24h iguais).
+ * Antes, com o módulo Whapi ligado, o chatbot de texto era pulado e o aviso NUNCA saía.
+ * @returns {Promise<{ applies: boolean, sent: boolean }>}
+ */
+async function aplicarForaHorario({ sb, company_id, conversa_id, telefone, sendMessage, opts, emitRealtime, conversaReabertaAposFinalizacao }) {
+  let chatbotConfig = null
+  try {
+    chatbotConfig = await getChatbotConfig(company_id)
+  } catch (e) {
+    console.warn('[whapiTriage] fora do horário: erro ao ler config da triagem:', e?.message || e)
+  }
+  if (!chatbotConfig) return { applies: false, sent: false }
+  // Mesmo guarda da triagem: atendente assumiu (ou setor definido) entre a leitura e o envio → cancela.
+  const guardedSend = async (phone, message, sendOpts = {}) => {
+    const beforeRequest = createTriageSendGuard(sb, company_id, conversa_id)
+    await beforeRequest()
+    const result = await sendMessage(phone, message, { ...sendOpts, beforeRequest })
+    if (beforeRequest.cancelled) throw Object.assign(new Error('Triagem cancelada'), { code: 'TRIAGE_CANCELLED' })
+    return result
+  }
+  return handleForaHorarioInbound({
+    config: chatbotConfig,
+    company_id,
+    conversa_id,
+    telefone,
+    supabaseClient: sb,
+    sendMessage: guardedSend,
+    opts,
+    emitRealtime,
+    conversaReabertaAposFinalizacao,
+  })
+}
+
+/**
  * Handler principal. Chamado pelo pipeline SÓ quando provider==='whapi' e o módulo está ligado.
  * @returns {Promise<{ handled:boolean, departamento_id?:number, atendente_id?:number|null, status_atendimento?:string }>}
  */
@@ -271,6 +309,18 @@ async function handleWhapiTriageInbound(ctx) {
 
   // ---- Seam B: cliente escolheu uma opção? (toque nativo OU número/nome digitado) ----
   const option = resolveSelectedOption(payload, config, texto)
+
+  // ---- Fora do horário / almoço (vale com a triagem interativa ligada) ----
+  // Fora do expediente o menu NÃO é enviado: o cliente recebe o aviso (igual ao chatbot de texto).
+  // Exceção: se ele escolheu uma opção de um menu que recebeu ainda no expediente, a escolha é
+  // respeitada (o setor encontra a conversa ao abrir) — o aviso sai antes da confirmação.
+  // Sem isso o toque se perdia e, como o menu já consta como enviado, não era reenviado depois.
+  const foraHorario = await aplicarForaHorario({
+    sb, company_id, conversa_id, telefone, sendMessage, opts, emitRealtime,
+    conversaReabertaAposFinalizacao: !!ctx.conversaReabertaAposFinalizacao,
+  })
+  if (foraHorario.applies && !option) return { handled: true }
+
   if (option) {
     if (selectInFlight.has(lockCid)) return { handled: true }
     selectInFlight.add(lockCid)

@@ -941,6 +941,15 @@ async function insertBotOutboundMensagem(supabaseClient, payload) {
     .insert(payload)
     .select('*')
     .single()
+  if (error && String(error.code || '') === '23505' && payload?.whatsapp_id) {
+    // Whapi: o eco from_me desta mesma mensagem chegou antes do insert e já gravou a linha
+    // (mesmo conversa_id + whatsapp_id) e já a anunciou em realtime. Não é falha — só não duplica.
+    console.log('[chatbotTriage] bolha do bot já gravada pelo eco do provedor (23505) — sem duplicar', {
+      conversa_id: payload?.conversa_id,
+      company_id: payload?.company_id,
+    })
+    return null
+  }
   if (error) {
     console.error('[chatbotTriage] ❌ falha ao gravar mensagem outbound no ZapERP (WhatsApp pode ter recebido)', {
       conversa_id: payload?.conversa_id,
@@ -959,7 +968,11 @@ async function insertBotOutboundMensagem(supabaseClient, payload) {
  * **depois** do menu. Evita falso positivo em conversas longas, onde as últimas 10 linhas podem ser
  * só `in` e a "última out" vista no slice errado não é o menu atual.
  */
-async function hasHumanIntervenedRecently(supabaseClient, company_id, conversa_id, config) {
+async function hasHumanIntervenedRecently(supabaseClient, company_id, conversa_id, config, { sinceMs = null } = {}) {
+  // sinceMs (opcional): só conta mensagem humana a partir deste instante. Usado pela mensagem
+  // fora do horário — uma fala do atendente de um atendimento ANTIGO (ex.: conversa finalizada
+  // ontem e reaberta hoje pelo cliente) não é "operador conversando agora".
+  const sinceIso = Number.isFinite(sinceMs) ? new Date(sinceMs).toISOString() : null
   try {
     const { data: menuRow } = await supabaseClient
       .from('bot_logs')
@@ -972,14 +985,15 @@ async function hasHumanIntervenedRecently(supabaseClient, company_id, conversa_i
       .maybeSingle()
 
     if (menuRow?.criado_em) {
-      const { data: outsDepoisMenu } = await supabaseClient
+      let qOuts = supabaseClient
         .from('mensagens')
         .select('id, texto, direcao, tipo, status, criado_em')
         .eq('conversa_id', conversa_id)
         .eq('company_id', company_id)
         .eq('direcao', 'out')
         .gt('criado_em', menuRow.criado_em)
-        .order('criado_em', { ascending: true })
+      if (sinceIso) qOuts = qOuts.gte('criado_em', sinceIso)
+      const { data: outsDepoisMenu } = await qOuts.order('criado_em', { ascending: true })
 
       for (const m of outsDepoisMenu || []) {
         if (isInternalNoteRow(m)) continue
@@ -994,12 +1008,14 @@ async function hasHumanIntervenedRecently(supabaseClient, company_id, conversa_i
       return false
     }
 
-    const { data: ultimas } = await supabaseClient
+    let qUltimas = supabaseClient
       .from('mensagens')
       .select('id, direcao, tipo, status, texto, criado_em')
       .eq('conversa_id', conversa_id)
       .eq('company_id', company_id)
       .in('direcao', REAL_MESSAGE_DIRECOES)
+    if (sinceIso) qUltimas = qUltimas.gte('criado_em', sinceIso)
+    const { data: ultimas } = await qUltimas
       .order('criado_em', { ascending: false })
       .limit(40)
 
@@ -1400,6 +1416,147 @@ async function shouldSendForaHorarioMessage(supabaseClient, company_id, conversa
 }
 
 /**
+ * Só conta como "operador conversando agora" a fala humana destas últimas horas. Uma resposta
+ * de atendente de dias atrás (atendimento antigo) não pode calar a mensagem fora do horário.
+ */
+const FORA_HORARIO_HUMANO_JANELA_MS = 6 * 60 * 60 * 1000
+
+/**
+ * Decide (sem I/O) se AGORA é fora do expediente ou pausa de almoço para a empresa.
+ * Usa o fuso da empresa (VPS em UTC não pode tratar 15:05 BRT como 18:05).
+ * @returns {{ deveEnviar: boolean, motivo: 'fora_horario'|'almoco', mensagem: string, foraDia: boolean }}
+ */
+function avaliarForaHorario(config, now = new Date()) {
+  const naoAplica = { deveEnviar: false, motivo: 'fora_horario', mensagem: '', foraDia: false }
+  if (!config?.foraHorarioEnabled || !config?.mensagemForaHorario) return naoAplica
+  try {
+    const timezone = config.timezone || 'America/Sao_Paulo'
+    const foraDia = isOutsideBusinessDays(config.diasSemanaDesativados, config.datasEspecificasFechadas, now, timezone)
+    const janelas = config.horariosJanelas?.length > 0 ? config.horariosJanelas : null
+    const dentroHorario = isWithinBusinessHours(config.horarioInicio, config.horarioFim, now, timezone, janelas)
+    const foraExpediente = foraDia || !dentroHorario
+    const dentroAlmoco = !!config.almocoAtivo && isWithinLunchBreak(config.almocoInicio, config.almocoFim, now, timezone)
+    if (!foraExpediente && !dentroAlmoco) return { ...naoAplica, foraDia }
+    // Só é "almoço" quando o cliente escreveu dentro do expediente, mas na janela de almoço.
+    if (dentroAlmoco && !foraExpediente) {
+      return {
+        deveEnviar: true,
+        motivo: 'almoco',
+        mensagem: String(config.mensagemAlmoco || '').trim() || config.mensagemForaHorario,
+        foraDia,
+      }
+    }
+    return { deveEnviar: true, motivo: 'fora_horario', mensagem: config.mensagemForaHorario, foraDia }
+  } catch (errTz) {
+    console.warn('[chatbotTriage] Erro ao avaliar horário comercial (timezone/janelas) — fallback: NÃO enviar fora-horário', errTz?.message || errTz)
+    return naoAplica
+  }
+}
+
+/**
+ * Mensagem fora do horário / pausa de almoço — ÚNICO ponto de envio, compartilhado pelo chatbot
+ * de texto e pela Triagem Interativa Whapi (antes a Whapi pulava o chatbot inteiro e o cliente
+ * nunca recebia o aviso). Independe do menu de triagem estar ligado.
+ *
+ * @param {object} p
+ * @param {object} p.config - config validada do chatbot_triage (getChatbotConfig)
+ * @param {Function} p.sendMessage - envio JÁ protegido pelo guarda da triagem (cancela se humano assumir)
+ * @param {boolean} [p.conversaReabertaAposFinalizacao] - reaberta agora pelo cliente: o ciclo começou
+ *   nesta mensagem, então nenhuma fala humana anterior conta como "atendente conversando".
+ * @returns {Promise<{ applies: boolean, sent: boolean, motivo?: string, reason?: string }>}
+ *   applies=false → dentro do expediente (ou recurso desligado): o chamador segue o fluxo normal.
+ *   applies=true  → é fora do expediente: o chamador NÃO envia menu/boas-vindas.
+ */
+async function handleForaHorarioInbound({
+  config,
+  company_id,
+  conversa_id,
+  telefone,
+  supabaseClient = null,
+  sendMessage,
+  opts = {},
+  emitRealtime = null,
+  conversaReabertaAposFinalizacao = false,
+  now = new Date(),
+}) {
+  const decisao = avaliarForaHorario(config, now)
+  if (!decisao.deveEnviar || !decisao.mensagem) return { applies: false, sent: false }
+
+  const { motivo, mensagem, foraDia } = decisao
+  const sb = supabaseClient || supabase
+  console.log('[chatbotTriage] fora do horário comercial — avaliando envio', {
+    conversa_id, company_id, timezone: config.timezone, motivo,
+    horario: config.horariosJanelas?.length ? `janelas:${config.horariosJanelas.length}` : `${config.horarioInicio}-${config.horarioFim}`,
+    almoco: config.almocoAtivo ? `${config.almocoInicio}-${config.almocoFim}` : 'off', foraDia,
+  })
+
+  const fhLockKey = `${company_id}:${conversaLockKey(conversa_id)}`
+  if (foraHorarioInFlight.has(fhLockKey)) {
+    console.log('[chatbotTriage] ❌ skip fora_horario: envio concorrente em andamento', { conversa_id, company_id })
+    return { applies: true, sent: false, motivo, reason: 'em_andamento' }
+  }
+  foraHorarioInFlight.add(fhLockKey)
+  try {
+    // Operador conversando agora (pelo celular/painel) → não se intromete. Conversa reaberta
+    // agora pelo cliente começou um ciclo novo: nada do atendimento anterior conta.
+    if (!conversaReabertaAposFinalizacao) {
+      const humanIntervened = await hasHumanIntervenedRecently(sb, company_id, conversa_id, config, {
+        sinceMs: now.getTime() - FORA_HORARIO_HUMANO_JANELA_MS,
+      })
+      if (humanIntervened) {
+        console.log('[chatbotTriage] ❌ skip fora_horario: operador humano interveio nas últimas horas', { conversa_id, company_id })
+        return { applies: true, sent: false, motivo, reason: 'humano_interveio' }
+      }
+    }
+    const canSend = await shouldSendForaHorarioMessage(sb, company_id, conversa_id, mensagem, config)
+    if (!canSend.ok) {
+      console.log('[chatbotTriage] ❌ skip fora_horario: regra anti-duplicação', {
+        conversa_id, company_id, motivo, reason: canSend.reason,
+      })
+      return { applies: true, sent: false, motivo, reason: canSend.reason }
+    }
+    const sendResultFora = await sendWithThrottle(sendMessage, telefone, mensagem, opts, company_id, config.intervaloEnvioSegundos)
+    logBotSendResult({ company_id, conversa_id, tipo: 'fora_horario' }, sendResultFora, opts)
+    const rowFora = await insertBotOutboundMensagem(sb, buildBotOutboundPayload({
+      conversa_id,
+      texto: mensagem,
+      company_id,
+      sendResult: sendResultFora,
+      opts,
+    }))
+    if (rowFora && typeof emitRealtime === 'function') {
+      try { await emitRealtime(rowFora) } catch (e) { console.warn('[chatbotTriage] emit fora_horario:', e?.message || e) }
+    }
+    const aceito = botSendAccepted(sendResultFora)
+    await logBotAction(company_id, conversa_id, aceito ? 'fora_horario' : 'fora_horario_falhou', {
+      motivo,
+      origem: opts?.sendOrigin === 'whapi_triage' ? 'whapi_triage' : 'chatbot_triage',
+      horario_inicio: config.horarioInicio,
+      horario_fim: config.horarioFim,
+      almoco_ativo: !!config.almocoAtivo,
+      almoco_inicio: config.almocoInicio,
+      almoco_fim: config.almocoFim,
+      dias_semana_desativados: config.diasSemanaDesativados,
+      data_fechada: foraDia,
+      debounce_segundos: config.foraHorarioDebounceSegundos,
+      cooldown_minutos: config.foraHorarioCooldownMinutos,
+      max_envios_24h: config.foraHorarioMaxEnvios24h,
+    })
+    lastForaHorarioSentAt.set(conversaLockKey(conversa_id), Date.now())
+    return { applies: true, sent: aceito, motivo }
+  } catch (e) {
+    if (e?.code === 'TRIAGE_CANCELLED') {
+      console.log('[chatbotTriage] fora_horario cancelado: atendente assumiu antes do envio', { conversa_id, company_id })
+    } else {
+      console.error('[chatbotTriage] ❌ Erro ao enviar mensagem fora do horário:', e?.message || e)
+    }
+    return { applies: true, sent: false, motivo, reason: e?.code === 'TRIAGE_CANCELLED' ? 'cancelado' : 'erro' }
+  } finally {
+    foraHorarioInFlight.delete(fhLockKey)
+  }
+}
+
+/**
  * Processa mensagem recebida do cliente no contexto do chatbot de triagem.
  * Chamado pelo webhook quando: !fromMe, !isGroup, departamento_id == null.
  *
@@ -1530,94 +1687,19 @@ async function processIncomingMessageLocked(ctx, conversaEstadoInicial) {
   // ── Mensagem fora do horário / pausa de almoço ───────────────────────────────
   // INDEPENDENTE do chatbot de triagem: deve chegar ao cliente mesmo com o menu de setores
   // desligado (config.enabled=false) ou sem opções/boas-vindas. Avaliada ANTES dos gates do menu.
-  // Usa timezone da empresa (evita VPS UTC considerar 15:05 BRT como 18:05 = fora).
-  if (config.foraHorarioEnabled && config.mensagemForaHorario) {
-    let deveEnviarForaHorario = false
-    let foraDia = false
-    let motivoForaHorario = 'fora_horario'
-    let mensagemParaEnviar = config.mensagemForaHorario
-    try {
-      const now = new Date()
-      const timezone = config.timezone || 'America/Sao_Paulo'
-      foraDia = isOutsideBusinessDays(config.diasSemanaDesativados, config.datasEspecificasFechadas, now, timezone)
-      const janelas = config.horariosJanelas?.length > 0 ? config.horariosJanelas : null
-      const dentroHorario = isWithinBusinessHours(config.horarioInicio, config.horarioFim, now, timezone, janelas)
-      const foraExpediente = foraDia || !dentroHorario
-      const dentroAlmoco = !!config.almocoAtivo && isWithinLunchBreak(config.almocoInicio, config.almocoFim, now, timezone)
-      deveEnviarForaHorario = foraExpediente || dentroAlmoco
-      // Só é "almoço" quando o cliente escreveu dentro do expediente, mas na janela de almoço.
-      if (dentroAlmoco && !foraExpediente) {
-        motivoForaHorario = 'almoco'
-        mensagemParaEnviar = String(config.mensagemAlmoco || '').trim() || config.mensagemForaHorario
-      }
-      if (deveEnviarForaHorario) {
-        console.log('[chatbotTriage] fora do horário comercial — enviando mensagem', {
-          conversa_id, company_id, timezone, motivo: motivoForaHorario,
-          horario: janelas ? `janelas:${janelas.length}` : `${config.horarioInicio}-${config.horarioFim}`,
-          almoco: config.almocoAtivo ? `${config.almocoInicio}-${config.almocoFim}` : 'off', foraDia
-        })
-      }
-    } catch (errTz) {
-      console.warn('[chatbotTriage] Erro ao avaliar horário comercial (timezone/janelas) — fallback: NÃO enviar fora-horário', errTz?.message || errTz)
-      deveEnviarForaHorario = false
-    }
-    if (deveEnviarForaHorario && mensagemParaEnviar) {
-      const sb = supabaseClient || supabase
-      const fhLockKey = `${company_id}:${conversaLockKey(conversa_id)}`
-      if (foraHorarioInFlight.has(fhLockKey)) {
-        console.log('[chatbotTriage] ❌ skip fora_horario: envio concorrente em andamento', { conversa_id, company_id })
-        return { handled: true }
-      }
-      foraHorarioInFlight.add(fhLockKey)
-      try {
-        // Se houve intervenção humana, não enviar fora-horário para não se intrometer no atendimento.
-        const humanIntervened = await hasHumanIntervenedRecently(sb, company_id, conversa_id, config)
-        if (humanIntervened) {
-          console.log('[chatbotTriage] ❌ skip fora_horario: operador humano já interveio', { conversa_id, company_id })
-          return { handled: true }
-        }
-        const canSend = await shouldSendForaHorarioMessage(sb, company_id, conversa_id, mensagemParaEnviar, config)
-        if (!canSend.ok) {
-          console.log('[chatbotTriage] ❌ skip fora_horario: regra anti-duplicação', {
-            conversa_id,
-            company_id,
-            motivo: motivoForaHorario,
-            reason: canSend.reason,
-          })
-          return { handled: true }
-        }
-        const sendResultFora = await sendWithThrottle(sendMessage, telefone, mensagemParaEnviar, opts, company_id, config.intervaloEnvioSegundos)
-        logBotSendResult({ company_id, conversa_id, tipo: 'fora_horario' }, sendResultFora, opts)
-        const rowFora = await insertBotOutboundMensagem(sb, buildBotOutboundPayload({
-          conversa_id,
-          texto: mensagemParaEnviar,
-          company_id,
-          sendResult: sendResultFora,
-          opts,
-        }))
-        await emitAfterBotMsg(rowFora)
-        await logBotAction(company_id, conversa_id, botSendAccepted(sendResultFora) ? 'fora_horario' : 'fora_horario_falhou', {
-          motivo: motivoForaHorario,
-          horario_inicio: config.horarioInicio,
-          horario_fim: config.horarioFim,
-          almoco_ativo: !!config.almocoAtivo,
-          almoco_inicio: config.almocoInicio,
-          almoco_fim: config.almocoFim,
-          dias_semana_desativados: config.diasSemanaDesativados,
-          data_fechada: foraDia,
-          debounce_segundos: config.foraHorarioDebounceSegundos,
-          cooldown_minutos: config.foraHorarioCooldownMinutos,
-          max_envios_24h: config.foraHorarioMaxEnvios24h,
-        })
-        lastForaHorarioSentAt.set(conversaLockKey(conversa_id), Date.now())
-      } catch (e) {
-        console.error('[chatbotTriage] ❌ Erro ao enviar mensagem fora do horário:', e?.message || e)
-      } finally {
-        foraHorarioInFlight.delete(fhLockKey)
-      }
-      return { handled: true }
-    }
-  }
+  // Mesma função usada pela Triagem Interativa Whapi (handleForaHorarioInbound).
+  const foraHorario = await handleForaHorarioInbound({
+    config,
+    company_id,
+    conversa_id,
+    telefone,
+    supabaseClient,
+    sendMessage,
+    opts,
+    emitRealtime: emitRt,
+    conversaReabertaAposFinalizacao,
+  })
+  if (foraHorario.applies) return { handled: true }
 
   // Gates do MENU de triagem (não afetam a mensagem fora do horário acima).
   if (!config.enabled) {
@@ -2140,6 +2222,8 @@ module.exports = {
   isWithinBusinessHours,
   isOutsideBusinessDays,
   isWithinLunchBreak,
+  avaliarForaHorario,
+  handleForaHorarioInbound,
   processIncomingMessage,
   logBotAction,
   buildWelcomeMessage,
