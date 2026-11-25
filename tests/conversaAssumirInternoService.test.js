@@ -20,8 +20,13 @@ jest.mock('../services/atendimentoSemRespostaService', () => ({
   resetAlertaSemRespostaAoAssumirReaberta: jest.fn().mockResolvedValue(undefined),
 }))
 
+jest.mock('../services/chat/access/conversationVisibilityService', () => ({
+  encerrarCoAtendimentoDaConversa: jest.fn().mockResolvedValue(0),
+}))
+
 const supabase = require('../config/supabase')
 const { executarAssumirConversa } = require('../services/conversaAssumirInternoService')
+const { encerrarCoAtendimentoDaConversa } = require('../services/chat/access/conversationVisibilityService')
 
 function mockChain(result = { data: null, error: null }) {
   const chain = {}
@@ -209,5 +214,42 @@ describe('executarAssumirConversa — espera de campanha', () => {
       .mockReturnValueOnce(mockChain({ data: null, error: { message: 'column "aguardando_resposta_campanha" does not exist' } }))
     const result = await executarAssumirConversa({ company_id: 10, conversa_id: 77, user_id: 4, perfil: 'atendente' })
     expect(result.ok).toBe(true)
+  })
+})
+
+describe('executarAssumirConversa — co-atendimento é por atendimento', () => {
+  beforeEach(() => jest.clearAllMocks())
+  const ABERTA_LIVRE = { ...CONV_FECHADA, status_atendimento: 'aberta', atendente_id: null }
+
+  test('assumir da fila (sem responsável) encerra co-atendentes que sobraram do atendimento anterior', async () => {
+    supabase.from
+      .mockReturnValueOnce(mockChain({ data: ABERTA_LIVRE, error: null }))
+      .mockReturnValueOnce(mockChain({ data: { limite_chats_por_atendente: 0 }, error: null }))
+      .mockReturnValueOnce(mockChain({ data: { ...ABERTA_LIVRE, atendente_id: 4, status_atendimento: 'em_atendimento' }, error: null }))
+    const result = await executarAssumirConversa({ company_id: 10, conversa_id: 77, user_id: 4, perfil: 'atendente' })
+    expect(result.ok).toBe(true)
+    expect(encerrarCoAtendimentoDaConversa).toHaveBeenCalledWith({ company_id: 10, conversa_id: 77, removido_por: 4 })
+  })
+
+  test('responsável que já tinha a conversa (re-assumir) mantém a equipe', async () => {
+    const minha = { ...ABERTA_LIVRE, status_atendimento: 'em_atendimento', atendente_id: 4 }
+    supabase.from
+      .mockReturnValueOnce(mockChain({ data: minha, error: null }))
+      .mockReturnValueOnce(mockChain({ data: { limite_chats_por_atendente: 0 }, error: null }))
+      .mockReturnValueOnce(mockChain({ data: minha, error: null }))
+    const result = await executarAssumirConversa({ company_id: 10, conversa_id: 77, user_id: 4, perfil: 'atendente' })
+    expect(result.ok).toBe(true)
+    expect(encerrarCoAtendimentoDaConversa).not.toHaveBeenCalled()
+  })
+
+  test('assumir que perdeu a corrida não mexe nos co-atendentes', async () => {
+    supabase.from
+      .mockReturnValueOnce(mockChain({ data: ABERTA_LIVRE, error: null }))
+      .mockReturnValueOnce(mockChain({ data: { limite_chats_por_atendente: 0 }, error: null }))
+      .mockReturnValueOnce(mockChain())
+      .mockReturnValueOnce(mockChain({ data: { ...ABERTA_LIVRE, atendente_id: 8, status_atendimento: 'em_atendimento' }, error: null }))
+    const result = await executarAssumirConversa({ company_id: 10, conversa_id: 77, user_id: 4, perfil: 'atendente' })
+    expect(result).toMatchObject({ ok: false, status: 409 })
+    expect(encerrarCoAtendimentoDaConversa).not.toHaveBeenCalled()
   })
 })

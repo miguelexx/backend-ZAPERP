@@ -101,3 +101,37 @@ Os **403 de `pps.whatsapp.net`** no console do mesmo modal são links assinados 
 `clientes.foto_perfil` (`oe=` decodificado: 08/10, 15/10, 19/10 e 05/11 — todos no passado). Não
 quebram nada: a lista já cai para as iniciais. O remédio existente é "Sincronizar fotos de
 perfil" em Configurações → Clientes. Nada alterado.
+
+## 2026-11-24 — "Novo grupo" (`POST /chats/grupos`) auditado
+
+Três defeitos em `controllers/chat/contactController.js#criarGrupo` (corrigidos, **não deployado**):
+
+1. **Grupo fantasma.** Empresa com 2+ números: o front não mandava `whatsapp_instance_id`,
+   `resolveWhatsappInstanceForManualAction` devolvia `SELECIONE_WHATSAPP_INSTANCE` com instância nula,
+   o provider ficava nulo e a função caía num insert local (`telefone: grupo_<ts>`) — o "grupo" só
+   existia no banco. O mesmo valia para número UltraMSG (sem `createGroup`) e para empresa sem número.
+   Agora: `400 SELECIONE_WHATSAPP_INSTANCE` (com `instances`), `409` sem número, `422
+   CRIAR_GRUPO_NAO_SUPORTADO` sem `createGroup`. **O insert local foi removido** — não ressuscitar.
+2. **9º dígito.** Participantes iam crus para `createGroup` e `toWhapiRecipient` reinseria o 9º. Agora
+   passam por `resolverEnderecosWhatsapp` (como o "adicionar"); número sem WhatsApp fica de fora.
+3. **"Adicionado" que não entrou.** A resposta ganhou `participantes_resultado
+   { enviados, adicionados, nao_adicionados[], sem_whatsapp[] }` (o objeto da conversa continua no
+   topo — `id` etc.). `services/chat/identity/resultadoCriacaoGrupo.js` usa `failed[]` quando a Whapi
+   manda; senão deduz por ausência em `participants[]`, **exceto** se houver `@lid` (aí não acusa).
+   O formato exato da resposta de `POST /groups` não foi medido no canal — a regra é defensiva.
+
+Front (`frontend/src/pages/NovoGrupo.jsx`): escolha do número (só com 2+), convite direto para quem o
+WhatsApp recusou (`/participantes/convidar`), falha da fila depois do grupo criado não vira mais
+"não foi possível criar", semente de grupo grande pula número sem WhatsApp (até 3).
+
+Testes: `tests/criarGrupoNovoGrupo.test.js` (13) · `frontend/e2e/novo-grupo.spec.js` (5×2, API mockada;
+rodar com `VITE_API_URL` igual ao do `.env` do front, senão o mock não casa e cai no /login).
+
+**2026-11-25 (2ª revisão):** a trava "visibilidade por número" não valia na criação — atendente
+liberado só para o número A via e criava grupo no B (depois 403 ao abrir, grupo sumia da lista dele).
+Agora `criarGrupo` checa `instanciasPermitidasDoUsuario` (`403 NUMERO_SEM_ACESSO`; sem escolha e
+com 1 número liberado usa esse; a lista de `SELECIONE_WHATSAPP_INSTANCE` vem filtrada) e
+`GET /chats/whatsapp-instances` ganhou `usuario_pode_usar` por número (campo ADITIVO — a lista segue
+completa para o filtro da lista de conversas). Número escolhido que saiu do ar → `400` pedindo outro.
+Front: seletor mostra só os liberados, avisa antes quando o único número é UltraMSG.
+Testes: 17 no backend, 8×2 no e2e.

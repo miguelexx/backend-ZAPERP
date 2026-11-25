@@ -132,6 +132,62 @@ async function usuarioParticipaAtivamenteDaConversa(company_id, conversa_id, usu
   return !!data
 }
 
+/**
+ * Fecha o co-atendimento da conversa: desativa TODOS os co-atendentes ativos.
+ *
+ * Co-atendimento pertence a UM atendimento. Sem isto a participação ficava `ativo=true` para
+ * sempre: o cliente voltava semanas depois, outra pessoa assumia e os co-atendentes antigos
+ * reapareciam na Minha fila deles (e no modal do novo responsável, contando no limite de 3).
+ * Chamado ao encerrar, ao reabrir, ao assumir uma conversa sem responsável e ao devolver para
+ * um setor. O gatilho SQL `conversa_atendentes_encerrar_ao_finalizar` cobre os demais caminhos
+ * de encerramento (ausência, jobs, bot).
+ *
+ * Com `usuario_id`, desativa só a participação dessa pessoa (ex.: virou a responsável
+ * principal por transferência — não pode aparecer como principal E co-atendente).
+ *
+ * Nunca lança: o atendimento em si já foi gravado; falhar aqui só deixa resíduo.
+ * @returns {Promise<number>} quantos co-atendentes foram desativados
+ */
+async function encerrarCoAtendimentoDaConversa({ company_id, conversa_id, removido_por = null, usuario_id = null }) {
+  if (company_id == null || conversa_id == null) return 0
+  const somenteUsuario = Number.isFinite(Number(usuario_id)) && Number(usuario_id) > 0 ? Number(usuario_id) : null
+  const filtrar = (q) => {
+    let r = q
+      .eq('company_id', Number(company_id))
+      .eq('conversa_id', Number(conversa_id))
+      .eq('ativo', true)
+    if (somenteUsuario != null) r = r.eq('usuario_id', somenteUsuario)
+    return r
+  }
+  const auditoria = {
+    removido_em: new Date().toISOString(),
+    removido_por: Number.isFinite(Number(removido_por)) && Number(removido_por) > 0 ? Number(removido_por) : null,
+  }
+  try {
+    let { data, error } = await filtrar(
+      supabase.from('conversa_atendentes').update({ ativo: false, ...auditoria })
+    ).select('id')
+    // Instalação sem as colunas de auditoria (migration 20260807130000): desativa sem elas.
+    if (error && /column|schema cache/i.test(String(error.message || ''))) {
+      ;({ data, error } = await filtrar(
+        supabase.from('conversa_atendentes').update({ ativo: false })
+      ).select('id'))
+    }
+    if (error) {
+      if (!isConversaAtendentesMissingTable(error)) {
+        console.warn('[encerrarCoAtendimentoDaConversa]', error.message || error)
+      }
+      return 0
+    }
+    const total = Array.isArray(data) ? data.length : 0
+    if (total > 0) invalidateConversaVisibilityCache(company_id, conversa_id)
+    return total
+  } catch (err) {
+    console.warn('[encerrarCoAtendimentoDaConversa]', err?.message || err)
+    return 0
+  }
+}
+
 function payloadAlteraVisibilidadeConversa(payload) {
   if (!payload || typeof payload !== 'object') return false
   return (
@@ -332,6 +388,7 @@ module.exports = {
   getConversaParticipanteIdsAtivos,
   getConversaIdsParticipanteAtivo,
   usuarioParticipaAtivamenteDaConversa,
+  encerrarCoAtendimentoDaConversa,
   payloadAlteraVisibilidadeConversa,
   deveIncluirGruposSemDepartamentoNoFiltroTodos,
   carregarUsuarioIdsQuePodemVerConversaSemCache,

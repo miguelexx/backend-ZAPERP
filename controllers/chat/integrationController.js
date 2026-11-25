@@ -10,6 +10,7 @@ const { getStatus } = require('../../services/ultramsgIntegrationService')
 const { getProvider } = require('../../services/providers')
 const { resolveCompanyWhatsappProvider } = require('../../services/chat/identity/conversationAddressService')
 const { listWhatsappInstances, sanitizeWhatsappInstance } = require('../../services/whatsappInstanceService')
+const { instanciasPermitidasDoUsuario, atendentePodeVerNumero } = require('../../services/chat/access/usuarioWhatsappInstanceAccess')
 
 const WHAPI_STATUS_MAX_INSTANCES = 8
 const WHAPI_LIVE_UP = new Set(['AUTH', 'CONNECTED', 'READY'])
@@ -81,10 +82,16 @@ exports.listWhatsappInstancesAtendimento = async (req, res) => {
     if (!company_id) return res.status(401).json({ error: 'Não autenticado' })
     const result = await listWhatsappInstances(company_id)
     if (result.error) return res.status(500).json({ error: result.error })
+    // `usuario_pode_usar`: false quando a trava de visão por número exclui este número para quem
+    // pediu. Só ACRESCENTA o campo — a lista continua completa para quem já a consome (filtro da
+    // lista, badge do número). Telas que agem num número (ex.: Novo grupo) filtram por ele.
+    let permitidas = null
+    try { permitidas = await instanciasPermitidasDoUsuario(company_id, req.user?.id) } catch { permitidas = null }
     const active = (result.instances || [])
       .filter((i) => i && i.ativo !== false)
       .map(sanitizeWhatsappInstance)
       .filter(Boolean)
+      .map((i) => ({ ...i, usuario_pode_usar: atendentePodeVerNumero(permitidas, i.id) }))
     return res.json({
       instances: active,
       has_multiple_whatsapp_instances: active.length > 1,

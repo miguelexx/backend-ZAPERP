@@ -165,6 +165,13 @@ async function executarAssumirConversa({
     return { ok: false, status: 409, error: 'Nao foi possivel assumir a conversa. Tente novamente.', conversa: null }
   }
 
+  // Assumir da fila (sem responsável) ou reabrindo = atendimento NOVO: co-atendentes que sobraram
+  // de um atendimento anterior não podem voltar junto (reapareciam na Minha fila deles).
+  if (atual.atendente_id == null || reabrindo) {
+    const { encerrarCoAtendimentoDaConversa } = require('./chat/access/conversationVisibilityService')
+    await encerrarCoAtendimentoDaConversa({ company_id, conversa_id, removido_por: user_id })
+  }
+
   await clearReabertaFaltaInteracao(company_id, conversa_id)
   await encerrarEsperaDeCampanhaAoAssumir(company_id, conversa_id, data)
 

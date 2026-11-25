@@ -4,6 +4,11 @@ jest.mock('../services/chat/access/conversationVisibilityService', () => ({
   getConversaParticipanteIdsAtivos: jest.fn(),
   invalidateConversaVisibilityCache: jest.fn(),
 }))
+// Trava de visão por número: ninguém travado nestes cenários.
+jest.mock('../services/chat/access/usuarioWhatsappInstanceAccess', () => ({
+  carregarMapaAcessoNumeros: jest.fn().mockResolvedValue(new Map()),
+  atendentePodeVerNumero: jest.requireActual('../services/chat/access/usuarioWhatsappInstanceAccessRules').atendentePodeVerNumero,
+}))
 jest.mock('../services/atendimentosRegistroService', () => ({ registrarAtendimento: jest.fn().mockResolvedValue({}) }))
 const supabase = require('../config/supabase')
 const { assertPermissaoConversa } = require('../services/chat/access/conversationPolicy')

@@ -129,3 +129,25 @@ Banco: `supabase/scripts_manuais/diagnostico/CONVERSAS_PRESAS_ENCERRAMENTO.sql` 
 leitura; consulta 2 lista o passivo e deve esvaziar sozinha ~10 min depois do deploy).
 
 Sem migration. Realtime inalterado (mesmos eventos de `emitirRealtimeEncerramentoAutomatico`).
+
+## Mensagem de finalização por encerramento (seta do "Encerrar", 24/11/2026)
+
+O botão **Encerrar** ganhou uma seta discreta dentro da própria cápsula (frontend:
+`src/atendimento/EncerrarSplitButton.jsx` + `encerrarSplit.css`). O atendente escolhe, **só naquele
+encerramento**, se o cliente recebe a "Mensagem ao finalizar atendimento".
+
+- `POST /chats/:id/encerrar` aceita corpo opcional `{ enviar_mensagem_finalizacao: true|false }`.
+  - `true` → envia mesmo com o toggle desligado (texto configurado; sem `ia_config`, o texto padrão
+    de `DEFAULT_CHATBOT_CONFIG`).
+  - `false` → encerra sem mensagem, mesmo com o toggle ligado.
+  - ausente/outro valor → **comportamento antigo** (segue o toggle). O clique direto no botão não
+    manda corpo — nada muda para quem não usa a seta.
+- `GET /chats/finalizacao-config` → `{ envio_automatico: boolean }`. Só o booleano, para o menu
+  marcar "Padrão"; `/ia/config` é restrito a supervisor/admin e atendente comum também encerra.
+  Rota fica **antes** de `/:id` no `chatRoutes.js`.
+- A guarda idempotente (re-encerrar conversa já fechada = 200 no-op) continua valendo: a escolha
+  não reenvia mensagem numa conversa já encerrada.
+- Testes: `tests/finalizacaoReferenceId.test.js` (bloco "escolha do atendente") e e2e
+  `audit-local-mock.spec.js` → "Encerrar: seta escolhe com/sem mensagem…".
+- Frontend: a seta é `<span role="button">` de propósito — `<button>` herdaria as regras
+  `.wa-actions button { … }` (várias com !important) e viraria uma segunda cápsula.

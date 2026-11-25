@@ -19,93 +19,156 @@ const { emitirEventoEmpresaConversa, emitirConversaAtualizada } = require('../..
 const { assertPermissaoConversa, assertPodeEnviarMensagem } = require('../../services/chat/access/conversationPolicy')
 const { loadWhatsappInstanceMetaMap } = require('../../services/chat/read/conversationLookups')
 const { safeWhatsappInstanceMeta } = require('../../services/chat/presentation/chatDto')
+const { resolverEnderecosWhatsapp } = require('../../services/chat/identity/enderecoWhatsappService')
+const { participantesNaoAdicionados } = require('../../services/chat/identity/resultadoCriacaoGrupo')
+const { instanciasPermitidasDoUsuario, atendentePodeVerNumero } = require('../../services/chat/access/usuarioWhatsappInstanceAccess')
+
+// Limite do WhatsApp para o nome (subject) de grupo.
+const GRUPO_NOME_MAX = 100
+
+/** Participantes vindos do front: dígitos únicos, na ordem em que chegaram. */
+function normalizarParticipantes(bruto) {
+  const arr = Array.isArray(bruto) ? bruto : (bruto != null && bruto !== '' ? [bruto] : [])
+  const out = []
+  for (const item of arr) {
+    const d = String(item ?? '').replace(/@[^@]+$/, '').replace(/\D/g, '')
+    if (d.length >= 8 && !out.includes(d)) out.push(d)
+  }
+  return out
+}
 
 exports.criarGrupo = async (req, res) => {
   try {
     const io = req.app.get('io')
     const { company_id, id: usuario_id } = req.user
     const nome = String(req.body?.nome || req.body?.subject || '').trim()
-    const participantes = req.body?.participantes || req.body?.participants || []
-    if (!nome) return res.status(400).json({ error: 'Informe o nome do grupo.' })
+    if (!nome) return res.status(400).json({ codigo: 'NOME_OBRIGATORIO', error: 'Informe o nome do grupo.' })
+    if (nome.length > GRUPO_NOME_MAX) {
+      return res.status(400).json({ codigo: 'NOME_LONGO', error: `O nome do grupo pode ter no máximo ${GRUPO_NOME_MAX} caracteres.` })
+    }
+    const phones = normalizarParticipantes(req.body?.participantes ?? req.body?.participants)
+    if (!phones.length) {
+      return res.status(400).json({ codigo: 'SEM_PARTICIPANTES', error: 'Selecione ao menos um participante para criar o grupo.' })
+    }
 
-    const instanceRes = await resolveWhatsappInstanceForManualAction(company_id, req.body?.whatsapp_instance_id)
+    // Empresa com 2+ números: o grupo nasce no número ESCOLHIDO. Antes, sem a escolha a
+    // instância vinha nula, o provider também, e a função caía num insert local — um "grupo"
+    // que só existia no banco (telefone `grupo_<ts>`), sem ninguém dentro e sem receber nada.
+    // O mesmo acontecia com número sem suporte a grupos (UltraMSG) e sem número conectado.
+    //
+    // Trava "visibilidade por número": quem só enxerga alguns números não pode criar grupo nos
+    // outros — o grupo nasceria num número que ele não vê (403 ao abrir, some da lista dele).
+    const permitidas = await instanciasPermitidasDoUsuario(company_id, usuario_id)
+    let pedido = req.body?.whatsapp_instance_id
+    const semPedido = pedido == null || String(pedido).trim() === ''
+    // Sem escolha e liberado para um número só: é esse (não há o que perguntar).
+    if (semPedido && permitidas && permitidas.size === 1) pedido = [...permitidas][0]
+
+    const instanceRes = await resolveWhatsappInstanceForManualAction(company_id, pedido)
+    if (instanceRes?.code === 'SELECIONE_WHATSAPP_INSTANCE') {
+      return res.status(400).json({
+        codigo: 'SELECIONE_WHATSAPP_INSTANCE',
+        error: 'Escolha por qual número WhatsApp o grupo será criado.',
+        instances: (instanceRes.instances || []).filter((i) => atendentePodeVerNumero(permitidas, i?.id)),
+      })
+    }
+    if (instanceRes?.code === 'INSTANCE_NOT_FOUND' || instanceRes?.code === 'INVALID_INSTANCE') {
+      return res.status(400).json({
+        codigo: 'SELECIONE_WHATSAPP_INSTANCE',
+        error: 'O número escolhido não está mais ativo. Escolha outro.',
+        instances: (instanceRes.instances || []).filter((i) => atendentePodeVerNumero(permitidas, i?.id)),
+      })
+    }
     const instance = instanceRes?.instance
-    const provider = instance ? getProvider({ provider: instance.provider }) : null
+    if (instanceRes?.error || !instance?.id) {
+      return res.status(409).json({
+        codigo: instanceRes?.code || 'SEM_INSTANCIA',
+        error: 'Nenhum número WhatsApp disponível para criar o grupo. Conecte um número e tente de novo.',
+      })
+    }
+    if (!atendentePodeVerNumero(permitidas, instance.id)) {
+      return res.status(403).json({
+        codigo: 'NUMERO_SEM_ACESSO',
+        error: 'Você não tem acesso a este número WhatsApp. Escolha um dos seus números.',
+      })
+    }
+    const provider = getProvider({ provider: instance.provider })
+    if (!provider || typeof provider.createGroup !== 'function') {
+      return res.status(422).json({
+        codigo: 'CRIAR_GRUPO_NAO_SUPORTADO',
+        error: 'Este número não permite criar grupos pelo sistema. Crie o grupo no celular — ele aparece aqui automaticamente.',
+      })
+    }
+    const opts = { companyId: company_id, whatsappInstanceId: instance.id }
 
-    if (provider && typeof provider.createGroup === 'function') {
-      const phones = Array.isArray(participantes) ? participantes : []
-      if (!phones.length) {
-        return res.status(400).json({ error: 'Informe ao menos um participante para criar o grupo no WhatsApp.' })
-      }
-      if (instanceRes.error || !instanceRes.instanceId) {
-        return res.status(400).json({ error: instanceRes.error || 'Instância WhatsApp indisponível' })
-      }
-      const created = await provider.createGroup(nome, phones, {
-        companyId: company_id,
-        whatsappInstanceId: instance.id,
+    // Endereço REAL de cada participante (o JID do WhatsApp pode não ter o 9º dígito). Mesmo
+    // defeito que derrubava "adicionar ao grupo" — ver enderecoWhatsappService.
+    const enderecos = await resolverEnderecosWhatsapp(provider, phones, opts)
+    const semWhatsapp = enderecos.filter((e) => e.existe === false).map((e) => e.original)
+    const alvos = enderecos.filter((e) => e.existe !== false)
+    if (!alvos.length) {
+      return res.status(422).json({
+        codigo: 'SEM_WHATSAPP',
+        error: semWhatsapp.length === 1
+          ? 'Este número não tem WhatsApp. Escolha outro participante.'
+          : 'Nenhum dos números escolhidos tem WhatsApp.',
+        sem_whatsapp: semWhatsapp,
       })
-      if (!created?.ok) {
-        const raw = Number(created?.httpStatus)
-        // 401 da Whapi = número desconectado; não devolver 401 (o front deslogaria). Vira 409.
-        if (raw === 401) {
-          return res.status(409).json({ codigo: 'WHATSAPP_DESCONECTADO', error: 'WhatsApp desconectado. Reconecte o número para criar o grupo.' })
-        }
-        const status = [400, 404, 429].includes(raw) ? raw : 422
-        return res.status(status).json({ error: created?.error || 'Não foi possível criar o grupo no WhatsApp.' })
+    }
+
+    // JID completo quando verificado: número cru passa por `toWhapiRecipient`, que reinsere o 9º.
+    const created = await provider.createGroup(nome, alvos.map((e) => e.chatId || e.jid), opts)
+    if (!created?.ok) {
+      const raw = Number(created?.httpStatus)
+      // 401 da Whapi = número desconectado; não devolver 401 (o front deslogaria). Vira 409.
+      if (raw === 401) {
+        return res.status(409).json({ codigo: 'WHATSAPP_DESCONECTADO', error: 'WhatsApp desconectado. Reconecte o número para criar o grupo.' })
       }
-      const gid = String(created.data?.id || created.data?.group_id || created.data?.chat_id || '').trim()
-      if (!gid) {
-        // Grupo nasceu no WhatsApp mas o provedor não devolveu o id. Criar uma conversa com
-        // telefone `grupo_<timestamp>` aqui seria pior que o erro: ela não aponta para grupo
-        // nenhum, não recebe mensagem e ainda aparece duplicada ao lado da conversa real.
-        console.error('[criarGrupo] provedor criou o grupo sem devolver id', created?.data)
-        return res.status(502).json({
-          error: 'O grupo foi criado no WhatsApp, mas o provedor não devolveu o identificador. Sincronize os grupos para trazê-lo.',
-        })
-      }
-      const phone = gid.toLowerCase().endsWith('@g.us') ? gid : `${gid.replace(/@g\.us$/i, '')}@g.us`
-      // findOrCreateConversation devolve { conversa, created } — e NÃO a conversa direto.
-      // Lendo `conv?.id` o resultado era sempre undefined, a função caía no insert de
-      // emergência abaixo e TODO grupo criado pelo sistema nascia DUPLICADO: a conversa certa
-      // (com o id @g.us) e uma fantasma com telefone `grupo_<timestamp>`, que é a que a API
-      // devolvia para a tela. Medido na empresa 4 em 10/11/2026: 4 pares assim.
-      const resultado = await findOrCreateConversation(supabase, {
-        company_id,
-        phone,
-        isGroup: true,
-        nomeGrupo: created.data?.name || nome,
-        whatsapp_instance_id: instance.id,
-        io,
+      const status = [400, 404, 429].includes(raw) ? raw : 422
+      return res.status(status).json({ error: created?.error || 'Não foi possível criar o grupo no WhatsApp.' })
+    }
+    const gid = String(created.data?.id || created.data?.group_id || created.data?.chat_id || '').trim()
+    if (!gid) {
+      // Grupo nasceu no WhatsApp mas o provedor não devolveu o id. Criar uma conversa com
+      // telefone `grupo_<timestamp>` aqui seria pior que o erro: ela não aponta para grupo
+      // nenhum, não recebe mensagem e ainda aparece duplicada ao lado da conversa real.
+      console.error('[criarGrupo] provedor criou o grupo sem devolver id', created?.data)
+      return res.status(502).json({
+        error: 'O grupo foi criado no WhatsApp, mas o provedor não devolveu o identificador. Sincronize os grupos para trazê-lo.',
       })
-      const conv = resultado?.conversa || null
-      if (conv?.id) {
-        emitirEventoEmpresaConversa(io, company_id, conv.id, 'nova_conversa', conv)
-        return res.json(conv)
-      }
+    }
+    const phone = gid.toLowerCase().endsWith('@g.us') ? gid : `${gid.replace(/@g\.us$/i, '')}@g.us`
+    // findOrCreateConversation devolve { conversa, created } — e NÃO a conversa direto.
+    // Lendo `conv?.id` o resultado era sempre undefined e TODO grupo criado pelo sistema nascia
+    // DUPLICADO (a conversa certa + uma fantasma `grupo_<timestamp>`). Medido em 10/11/2026.
+    const resultado = await findOrCreateConversation(supabase, {
+      company_id,
+      phone,
+      isGroup: true,
+      nomeGrupo: created.data?.name || created.data?.subject || nome,
+      whatsapp_instance_id: instance.id,
+      io,
+    })
+    const conv = resultado?.conversa || null
+    if (!conv?.id) {
       console.error('[criarGrupo] não foi possível criar a conversa do grupo', phone)
       return res.status(500).json({ error: 'O grupo foi criado no WhatsApp, mas não foi possível abrir a conversa aqui.' })
     }
+    emitirEventoEmpresaConversa(io, company_id, conv.id, 'nova_conversa', conv)
 
-    const { data, error } = await supabase
-      .from('conversas')
-      .insert({
-        company_id,
-        tipo: 'grupo',
-        nome_grupo: nome,
-        telefone: `grupo_${Date.now()}`,
-        status_atendimento: 'aberta',
-        usuario_id,
-      })
-      .select()
-      .single()
-
-    if (error) { console.error('[chatController]', error?.message); return res.status(500).json({ error: 'Erro interno' }) }
-
-    emitirEventoEmpresaConversa(io, company_id, data.id, 'nova_conversa', data)
-
-    return res.json(data)
+    // 200 da Whapi não quer dizer que todos entraram: a privacidade do contato recusa em silêncio.
+    const naoAdicionados = participantesNaoAdicionados(created.data, alvos)
+    return res.json({
+      ...conv,
+      participantes_resultado: {
+        enviados: alvos.length,
+        adicionados: Math.max(0, alvos.length - naoAdicionados.length),
+        nao_adicionados: naoAdicionados,
+        sem_whatsapp: semWhatsapp,
+      },
+    })
   } catch (err) {
-    console.error(err)
+    console.error('[criarGrupo]', err)
     return res.status(500).json({ error: 'Erro ao criar grupo' })
   }
 }

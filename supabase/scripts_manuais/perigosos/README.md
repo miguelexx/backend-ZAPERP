@@ -82,6 +82,40 @@ deixe as duas listas só com `empresas`. Para outra empresa, troque o `3` em `cf
 `v_company` (apagar). Não apaga a mídia no R2/Storage e não desativa a instância no painel do
 provider.
 
+## `COMPANY_19_*.sql` — zerar o histórico da empresa 19 (Maranata)
+
+Cópia dos `COMPANY_3_*` com `company` / `v_company` = **19**; nada mais mudou (mesmas listas
+`manter`/`v_manter`, mesmo comportamento). Preserva os 11 atendentes, os departamentos, a conexão
+de WhatsApp e a configuração; zera conversas, mensagens, clientes, atendimentos e logs.
+
+| Arquivo | O que faz |
+|---|---|
+| `COMPANY_19_0_MENSAGENS_EM_LOTES.sql` | Desnecessário hoje — a empresa 19 tem ~9,7 mil mensagens, bem abaixo das ~500 mil. |
+| `COMPANY_19_1_SIMULAR.sql` | **Só leitura.** Rode antes e depois. A primeira linha tem que mostrar `Maranata`. |
+| `COMPANY_19_2_APAGAR.sql` | Apaga. Transação única: travou ou sobrou linha, faz rollback de tudo. |
+| `COMPANY_19_3_USUARIOS_SIMULAR.sql` | **Só leitura.** Lista os 12 atendentes e o efeito por FK. |
+| `COMPANY_19_4_USUARIOS_APAGAR.sql` | Apaga **todos** os atendentes — `v_manter_ids` está vazio de propósito. |
+| `MOVER_INSTANCIA_AQUAMN_FJBTF_PARA_GJ.sql` | Move a instância Whapi da empresa 19 para a 32 (GJ), que reaproveitou o número. |
+
+Contexto: o número 553434218097 (canal `AQUAMN-FJBTF`) foi reaproveitado pela empresa 32 (GJ), então a
+Maranata está sendo descontinuada — por isso os `_3_`/`_4_` apagam **todos** os atendentes e o
+`MOVER_*` transfere a instância. Ordem: `_2_` → `_4_` → `MOVER_*`.
+
+Volume em 24/11/2026, antes de rodar: 579 conversas · 9.749 mensagens · 435 clientes · 51
+atendimentos · 6 mensagens de chat interno. Preservados: 11 usuários · 8 departamentos · 1
+instância de WhatsApp.
+
+## `REMOVER_EMPRESA_32_GJ_DUPLICADA.sql` — tirar a GJ duplicada
+
+Em 24/11/2026 a empresa 19 ("Maranata") foi **renomeada para GJ** e ficou com a instância
+`AQUAMN-FJBTF` (553434218097). A empresa 32, criada na mesma hora com o mesmo nome, nunca foi
+usada — só tem os 4 departamentos que o cadastro cria sozinho. Duas empresas "GJ" confundem a
+seleção de empresa e os relatórios.
+
+⚠️ **A GJ boa é a 19.** O script não usa o nome como guarda: exige `id = 32` **e** que a empresa
+esteja vazia (varre todas as tabelas com `company_id`; só `departamentos` pode ter linha), e ainda
+confere que a empresa 19 continua existindo e com instância. Qualquer divergência → rollback.
+
 ## Os demais arquivos
 
 `APAGAR_DADOS_COMPANY_4.sql`, `EXCLUIR_CLIENTE_ESPECIFICO.sql`, `EXCLUIR_CONVERSAS_LISTA_ESPECIFICA.sql`,

@@ -23,7 +23,8 @@ const { gravarResultadoDoEnvio } = require('../../services/chat/outbound/outboun
 const { INTERNAL_NOTE_PERMISSAO, INTERNAL_NOTE_STATUS, sanitizeInternalNoteTexto, buildInternalNoteInsert } = require('../../helpers/internalNote')
 const { usuarioTemPermissao } = require('../../helpers/permissoesService')
 const { resolveConversationWhatsappInstance, resolveConversationProvider } = require('../../services/chat/identity/conversationAddressService')
-const { invalidateConversaVisibilityCache, isConversaAtendentesMissingTable, getConversaParticipanteIdsAtivos, usuarioParticipaAtivamenteDaConversa } = require('../../services/chat/access/conversationVisibilityService')
+const { invalidateConversaVisibilityCache, isConversaAtendentesMissingTable, getConversaParticipanteIdsAtivos, usuarioParticipaAtivamenteDaConversa, encerrarCoAtendimentoDaConversa } = require('../../services/chat/access/conversationVisibilityService')
+const { carregarMapaAcessoNumeros, atendentePodeVerNumero } = require('../../services/chat/access/usuarioWhatsappInstanceAccess')
 const { emitirConversaAtualizada, emitirParaUsuariosQuePodemVerConversa, emitirEventoEmpresaConversa, emitirSincronizacaoListaConversas, emitirLock, emitirRealtimeAposAssumir, emitirParaUsuario, emitirMovimentacaoInternaAtendimento, emitirDepartamento } = require('../../services/chat/realtime/chatRealtimeGateway')
 const { assertPermissaoConversa } = require('../../services/chat/access/conversationPolicy')
 const { enrichMensagemComAutorUsuario } = require('../../services/chat/presentation/messageAuthorEnrichment')
@@ -214,8 +215,10 @@ exports.encerrarChat = async (req, res) => {
     const { rememberClosedConversation } = require('../webhookInbound/recentClosedConversationGuard')
     rememberClosedConversation({ companyId: company_id, conversaId: conversa_id })
     // Paralelo: resetOpcaoInvalidaLimit não tem dependência do resultado de registrarAtendimento
-    const [, resultAt] = await Promise.all([
+    const [, , resultAt] = await Promise.all([
       resetOpcaoInvalidaLimitForConversa(supabase, company_id, conversa_id),
+      // Co-atendimento acaba com o atendimento (senão volta sozinho no próximo atendimento).
+      encerrarCoAtendimentoDaConversa({ company_id, conversa_id, removido_por: user_id }),
       registrarAtendimento({
         conversa_id,
         company_id,
@@ -415,6 +418,9 @@ exports.reabrirChat = async (req, res) => {
       return res.status(409).json({ error: 'Esta conversa já foi reaberta por outra pessoa' })
     }
 
+    // Novo atendimento: co-atendentes do atendimento anterior não voltam junto (ex.: encerrada
+    // por ausência/job, caminhos que não passam por encerrarChat).
+    await encerrarCoAtendimentoDaConversa({ company_id, conversa_id, removido_por: user_id })
     await clearReabertaFaltaInteracao(company_id, conversa_id)
 
     const resultAt = await registrarAtendimento({
@@ -732,6 +738,16 @@ exports.transferirChat = async (req, res) => {
       return res.status(409).json({ error: 'Esta conversa já foi transferida ou assumida por outra pessoa' })
     }
 
+    // Saindo da fila (sem responsável) = atendimento novo: não herda co-atendentes que sobraram.
+    // Com responsável: a equipe continua, mas quem RECEBEU deixa de ser co-atendente — senão
+    // aparecia duas vezes no modal (Responsável e Co-atendente) e ocupava uma das 3 vagas.
+    await encerrarCoAtendimentoDaConversa({
+      company_id,
+      conversa_id,
+      removido_por: user_id,
+      usuario_id: perm.conv.atendente_id == null ? null : para_usuario_id,
+    })
+
     const resultAt = await registrarAtendimento({
       conversa_id,
       company_id,
@@ -872,6 +888,16 @@ function podeRemoverCoAtendente({ perfil, user_id, conv, participante, uidRemove
 }
 
 /**
+ * Trava de visão por número WhatsApp (gate mais externo): quem não vê o número da conversa não
+ * a vê em lugar nenhum — nem sendo co-atendente. Incluir essa pessoa "dava certo" (201), mas a
+ * conversa nunca aparecia na Minha fila dela e abrir dava 403.
+ */
+function usuarioVeNumeroDaConversa(mapaNumeros, usuario_id, whatsapp_instance_id) {
+  const permitidas = mapaNumeros?.get?.(Number(usuario_id))
+  return atendentePodeVerNumero(permitidas && permitidas.size > 0 ? permitidas : null, whatsapp_instance_id)
+}
+
+/**
  * Avisa TODOS que veem a conversa (e quem está com ela aberta) que a lista de
  * atendentes mudou. Antes só o incluído/removido recebia evento: o responsável
  * e o supervisor com o modal aberto ficavam com a lista velha até reabrir.
@@ -911,9 +937,12 @@ exports.listarAtendentesDisponiveisConversa = async (req, res) => {
 
     if (error) { console.error('[chatController]', error?.message); return res.status(500).json({ error: 'Erro interno' }) }
 
+    const mapaNumeros = await carregarMapaAcessoNumeros(company_id)
+
     return res.json((data || [])
       .filter((u) => ['atendente', 'supervisor', 'admin'].includes(String(u.perfil || '').toLowerCase()))
       .filter((u) => !participanteIds.has(Number(u.id)))
+      .filter((u) => usuarioVeNumeroDaConversa(mapaNumeros, u.id, perm.conv?.whatsapp_instance_id))
       .map((u) => ({
         usuario_id: Number(u.id),
         id: Number(u.id),
@@ -1162,7 +1191,10 @@ exports.listarAtendentesConversa = async (req, res) => {
         }]
       : []
 
-    const adicionais = (participantes || []).map((p) => ({
+    // Defesa: quem é o responsável principal nunca é listado também como co-atendente
+    // (resíduo de transferência para um co-atendente antes da correção de 25/11/2026).
+    const principalId = perm.conv?.atendente_id != null ? Number(perm.conv.atendente_id) : null
+    const adicionais = (participantes || []).filter((p) => Number(p.usuario_id) !== principalId).map((p) => ({
       id: Number(p.id),
       usuario_id: Number(p.usuario_id),
       tipo: 'participante',
@@ -1228,11 +1260,21 @@ exports.adicionarAtendenteConversa = async (req, res) => {
       return res.status(400).json({ error: 'Usuario selecionado nao possui perfil de atendimento' })
     }
 
+    const mapaNumeros = await carregarMapaAcessoNumeros(company_id)
+    if (!usuarioVeNumeroDaConversa(mapaNumeros, usuario_id, perm.conv?.whatsapp_instance_id)) {
+      const nomeAlvo = (targetUser?.nome && String(targetUser.nome).trim()) || 'Este atendente'
+      return res.status(409).json({
+        error: `${nomeAlvo} não tem acesso ao número WhatsApp desta conversa. Libere o número para ele antes de adicioná-lo.`,
+        code: 'CO_ATENDENTE_SEM_ACESSO_AO_NUMERO',
+      })
+    }
+
     if (await usuarioParticipaAtivamenteDaConversa(company_id, conversa_id, usuario_id)) {
       return res.json({ ok: true, already_participant: true })
     }
 
-    const participantesAtivos = await getConversaParticipanteIdsAtivos(company_id, conversa_id)
+    const participantesAtivos = (await getConversaParticipanteIdsAtivos(company_id, conversa_id))
+      .filter((id) => Number(id) !== Number(perm.conv.atendente_id))
     if (participantesAtivos.length >= 3) {
       return res.status(409).json({ error: 'Limite de 4 atendentes por conversa atingido (1 principal + 3 co-atendentes).' })
     }
@@ -1384,6 +1426,10 @@ exports.transferirSetor = async (req, res) => {
       .single()
 
     if (errUpd) return res.status(500).json({ error: errUpd.message })
+
+    // Voltou para a fila (sem responsável): quem assumir começa um atendimento novo, sem herdar
+    // os co-atendentes de agora.
+    await encerrarCoAtendimentoDaConversa({ company_id, conversa_id, removido_por: user_id })
 
     const observacaoTexto = remover ? `${depAntigoNome} → Sem setor` : `${depAntigoNome} → ${novoDep.nome}`
     await supabase.from('historico_atendimentos').insert({
