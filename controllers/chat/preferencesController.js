@@ -12,6 +12,7 @@ const {
 } = require('../../services/chat/identity/conversationAddressService')
 const { emitirParaUsuario } = require('../../services/chat/realtime/chatRealtimeGateway')
 const { assertPermissaoConversa } = require('../../services/chat/access/conversationPolicy')
+const { invalidateCountsCache } = require('../../services/chatListCountsService')
 
 const MUTE_ESPELHO_MS = 365 * 24 * 60 * 60 * 1000 // ~1 ano: "silenciado" no app até desmutar
 
@@ -133,6 +134,10 @@ exports.patchConversaPrefs = async (req, res) => {
       console.error('[chatController] conversa_prefs', error?.message)
       return res.status(500).json({ error: 'Erro interno' })
     }
+
+    // Grupo fixado entra/sai da Minha fila deste usuário: o chip não pode esperar o TTL do
+    // cache de contadores (o frontend reconcilia /chats/counts logo após o PATCH).
+    if (body.fixada !== undefined) invalidateCountsCache(company_id, user_id)
 
     // Espelha fixar/silenciar no WhatsApp do número (best-effort; não bloqueia a resposta).
     await espelharPrefsNoWhatsapp(company_id, conversa_id, {

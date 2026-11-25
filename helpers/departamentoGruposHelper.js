@@ -173,6 +173,44 @@ async function getGrupoIdsFixadosPeloUsuario(company_id, usuario_id) {
   return normalizePositiveIds(grupoIds)
 }
 
+/**
+ * Grupos fixados pelo usuário que ele PODE VER — são os que entram na Minha fila.
+ *
+ * Não-admin enxerga grupo do próprio setor (`grupoIdsPermitidosPorDepartamento`) ou grupo sem
+ * setor nenhum (sem linha em `departamento_grupos`, o caso comum). A visibilidade da Minha fila só
+ * libera grupos do setor; sem esta lista, o grupo sem setor fixado na aba "Todas" piscava na Minha
+ * fila (otimista) e sumia no GET. Também barra o pin "órfão" de um grupo que mudou para outro setor.
+ * Admin vê tudo (o filtro por setor, quando houver, continua valendo na query).
+ */
+async function getGrupoIdsFixadosVisiveisNaMinhaFila({
+  company_id,
+  usuario_id,
+  isAdmin = false,
+  grupoIdsPermitidosPorDepartamento = [],
+} = {}) {
+  const fixados = await getGrupoIdsFixadosPeloUsuario(company_id, usuario_id)
+  if (fixados.length === 0 || isAdmin) return fixados
+
+  const permitidos = new Set(normalizePositiveIds(grupoIdsPermitidosPorDepartamento))
+  const visiveis = fixados.filter((id) => permitidos.has(id))
+  const restantes = fixados.filter((id) => !permitidos.has(id))
+  if (restantes.length === 0) return visiveis
+
+  const { data, error } = await supabase
+    .from('departamento_grupos')
+    .select('conversa_id')
+    .eq('company_id', Number(company_id))
+    .in('conversa_id', restantes)
+  if (error) {
+    // Sem a tabela de vínculo todo grupo é "sem setor" (mesma regra de getGrupoIdsSemDepartamento).
+    if (isDepartamentoGruposUnavailable(error)) return fixados
+    throw error
+  }
+  const vinculados = new Set(normalizePositiveIds((data || []).map((r) => r.conversa_id)))
+  for (const id of restantes) if (!vinculados.has(id)) visiveis.push(id)
+  return normalizePositiveIds(visiveis)
+}
+
 async function usuarioPodeVerGrupo({ company_id, conversa_id, role, departamento_ids }) {
   if (isAdminRole(role)) return true
 
@@ -227,6 +265,7 @@ module.exports = {
   getGrupoIdsPorDepartamentos,
   getGrupoIdsSemDepartamento,
   getGrupoIdsFixadosPeloUsuario,
+  getGrupoIdsFixadosVisiveisNaMinhaFila,
   usuarioPodeVerGrupo,
   pushNonGroupVisibilityParts,
   pushAtendenteFilaLivreVisibilityParts,

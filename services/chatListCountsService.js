@@ -36,7 +36,7 @@ const {
 const {
   getGrupoIdsPorDepartamentos,
   getGrupoIdsSemDepartamento,
-  getGrupoIdsFixadosPeloUsuario,
+  getGrupoIdsFixadosVisiveisNaMinhaFila,
   pushNonGroupVisibilityParts,
   pushAtendenteFilaLivreVisibilityParts,
   pushAllowedGroupIdsPart,
@@ -237,9 +237,14 @@ async function resolveChatListCountsContext(req) {
   const grupoIdsSemDepartamento =
     !isAdmin && !filter_dep_id ? await getGrupoIdsSemDepartamento(company_id) : []
 
-  // Grupos que o próprio usuário fixou — entram na contagem da "Minha fila" para o badge bater
-  // com a lista (que também passa a incluí-los). [] se a tabela de prefs não existir.
-  const grupoIdsFixadosNaMinhaFila = await getGrupoIdsFixadosPeloUsuario(company_id, user_id).catch(() => [])
+  // Grupos que o próprio usuário fixou E pode ver — entram na contagem da "Minha fila" para o
+  // badge bater com a lista (que também os inclui). [] se a tabela de prefs não existir.
+  const grupoIdsFixadosNaMinhaFila = await getGrupoIdsFixadosVisiveisNaMinhaFila({
+    company_id,
+    usuario_id: user_id,
+    isAdmin,
+    grupoIdsPermitidosPorDepartamento,
+  }).catch(() => [])
 
   let grupoUnreadIdsAguardando = []
   let unreadMap = {}
@@ -437,6 +442,8 @@ function applyChatListSqlFilters(query, ctx, overrides = {}) {
     })) {
       pushAllowedGroupIdsPart(parts, grupoIdsSemDepartamento)
     }
+    // Minha fila: grupo fixado sem setor (só visível na aba Todas) também precisa passar aqui.
+    if (minhaFilaAtiva) pushAllowedGroupIdsPart(parts, grupoIdsFixadosNaMinhaFila)
     if (conversaIdsTransferidas.length > 0) {
       parts.push(`id.in.(${conversaIdsTransferidas.join(',')})`)
     }
@@ -479,14 +486,13 @@ function applyChatListSqlFilters(query, ctx, overrides = {}) {
     q = q.or('tipo.is.null,tipo.neq.grupo')
     q = q.eq('aguardando_resposta_campanha', true)
   } else if (minhaFilaAtiva) {
-    // Abre exceção na exclusão de grupos para os grupos que o usuário fixou (casam o OR de
-    // status via 'aberta'); o pós-filtro confirma. Espelha a lista (conversationListController).
+    // Abre exceção para os grupos que o usuário fixou na exclusão de grupos E no OR de status
+    // (não dependem de status 'aberta'); o pós-filtro confirma. Espelha a lista.
     const fixadosNaFila = Array.isArray(grupoIdsFixadosNaMinhaFila) ? grupoIdsFixadosNaMinhaFila : []
-    q = fixadosNaFila.length > 0
-      ? q.or(`tipo.is.null,tipo.neq.grupo,id.in.(${fixadosNaFila.join(',')})`)
-      : q.or('tipo.is.null,tipo.neq.grupo')
+    const fixadosIn = fixadosNaFila.length > 0 ? `id.in.(${fixadosNaFila.join(',')}),` : ''
+    q = q.or(`${fixadosIn}tipo.is.null,tipo.neq.grupo`)
     q = q.or(
-      `status_atendimento.eq.aberta,and(status_atendimento.eq.em_atendimento,atendente_id.eq.${user_id}),and(status_atendimento.eq.aguardando_cliente,atendente_id.eq.${user_id}),and(status_atendimento.eq.pagamento_pendente,atendente_id.eq.${user_id}),and(status_atendimento.eq.em_atraso,atendente_id.eq.${user_id})${conversaIdsParticipanteAtivo.length > 0 ? `,and(status_atendimento.in.(em_atendimento,aguardando_cliente,pagamento_pendente,em_atraso),id.in.(${conversaIdsParticipanteAtivo.join(',')}))` : ''}`
+      `${fixadosIn}status_atendimento.eq.aberta,and(status_atendimento.eq.em_atendimento,atendente_id.eq.${user_id}),and(status_atendimento.eq.aguardando_cliente,atendente_id.eq.${user_id}),and(status_atendimento.eq.pagamento_pendente,atendente_id.eq.${user_id}),and(status_atendimento.eq.em_atraso,atendente_id.eq.${user_id})${conversaIdsParticipanteAtivo.length > 0 ? `,and(status_atendimento.in.(em_atendimento,aguardando_cliente,pagamento_pendente,em_atraso),id.in.(${conversaIdsParticipanteAtivo.join(',')}))` : ''}`
     )
   } else if (pagamentoPendenteAtivo) {
     q = q.eq('status_atendimento', 'pagamento_pendente')
@@ -908,7 +914,8 @@ function withTimeout(promise, timeoutMs) {
  * TTL: `CHAT_COUNTS_CACHE_TTL_MS` (default 20 s; era 10 s fixo até 10/11/2026 — doc 41 §7).
  * Quem invalida (`invalidateCountsCache`), conferido em 10/11/2026: SÓ
  * `controllers/chat/usuarioWhatsappInstanceAccessController` (admin muda quem vê cada
- * número). Assumir/transferir/encerrar/finalização automática NÃO invalidam este cache —
+ * número) — e, desde 25/11/2026, `preferencesController` ao fixar/desafixar (só as chaves do
+ * próprio usuário: grupo fixado entra na Minha fila dele). Assumir/transferir/encerrar/finalização automática NÃO invalidam este cache —
  * o frontend cobre o intervalo com delta otimista local nos chips (`chatList.jsx`,
  * `optimisticRemovedMinhaFila`) e refaz o GET no próximo flush de reconciliação. Logo o
  * TTL maior só alarga a janela em que um chip pode ficar defasado para QUEM NÃO fez a ação;
@@ -963,12 +970,13 @@ function setCachedCounts(key, data) {
   }
 }
 
-function invalidateCountsCache(company_id) {
+function invalidateCountsCache(company_id, user_id = null) {
   if (company_id == null) {
     _countsCache.clear()
     return
   }
-  const prefix = `${company_id}:`
+  // Com user_id: só as entradas daquele usuário (chave `company:user:filtros`).
+  const prefix = user_id != null ? `${company_id}:${user_id}:` : `${company_id}:`
   for (const key of [..._countsCache.keys()]) {
     if (key.startsWith(prefix)) _countsCache.delete(key)
   }

@@ -17,7 +17,7 @@ const { usuarioPertenceSetorFinanceiro } = require('../../helpers/financeiroSeto
 const { listarColaboradoresEncaminhar } = require('../../helpers/colaboradoresEncaminharHelper')
 const { buildClienteSearchOr, buildTelefoneSearchOr, buildPhoneSearchTerms, chatIdentityMatchesSearch, gerarVariantesOrdinais } = require('../../helpers/chatSearchHelper')
 const { buscarConversaIdsPorNomesVinculados, buscarClienteIdsPorNomeVinculado, anexarVinculosEmBusca } = require('../../helpers/clienteNomesVinculados')
-const { getGrupoIdsPorDepartamentos, getGrupoIdsSemDepartamento, getGrupoIdsFixadosPeloUsuario, pushNonGroupVisibilityParts, pushAtendenteFilaLivreVisibilityParts, pushAllowedGroupIdsPart } = require('../../helpers/departamentoGruposHelper')
+const { getGrupoIdsPorDepartamentos, getGrupoIdsSemDepartamento, getGrupoIdsFixadosVisiveisNaMinhaFila, pushNonGroupVisibilityParts, pushAtendenteFilaLivreVisibilityParts, pushAllowedGroupIdsPart } = require('../../helpers/departamentoGruposHelper')
 const { countConversasWithFilter, overridesFromListQuery, parseConversaIdsQuery, getStartOfTodayIso, getEndOfTodayIso } = require('../../services/chatListCountsService')
 const { parsePositiveInt, parseChatListPagination, applyChatListCursor, splitChatListPage, shouldIncludeClientesSemConversa, setChatListPaginationHeaders } = require('../../services/chat/read/pagination')
 const { getChatSearchIdLimit, getChatFilterIdLimit } = require('../../services/chat/read/searchLimits')
@@ -191,10 +191,15 @@ exports.listarConversas = async (req, res) => {
     }
     const conversaIdsParticipanteAtivoSet = new Set(conversaIdsParticipanteAtivo.map(Number))
     const conversaIdsTransferidasSet = new Set(conversaIdsTransferidas.map(Number))
-    // Grupos que o próprio atendente fixou — entram na Minha fila (fixados no topo). Resolvido
-    // aqui (parte async) porque buildQuery é síncrona; computado só na aba Minha fila.
+    // Grupos que o próprio atendente fixou E pode ver — entram na Minha fila (fixados no topo).
+    // Resolvido aqui (parte async) porque buildQuery é síncrona; computado só na aba Minha fila.
     const grupoIdsFixadosNaMinhaFila = minhaFilaAtiva
-      ? await getGrupoIdsFixadosPeloUsuario(company_id, user_id).catch(() => [])
+      ? await getGrupoIdsFixadosVisiveisNaMinhaFila({
+        company_id,
+        usuario_id: user_id,
+        isAdmin,
+        grupoIdsPermitidosPorDepartamento,
+      }).catch(() => [])
       : []
 
     let grupoUnreadIdsAguardando = []
@@ -479,6 +484,8 @@ exports.listarConversas = async (req, res) => {
         pushNonGroupVisibilityParts(parts, 'atendente_id', [user_id])
         pushAllowedGroupIdsPart(parts, grupoIdsPermitidosPorDepartamento)
         pushAllowedGroupIdsPart(parts, grupoIdsSemDepartamento)
+        // Minha fila: grupo fixado sem setor (só visível na aba Todas) também precisa passar aqui.
+        if (minhaFilaAtiva) pushAllowedGroupIdsPart(parts, grupoIdsFixadosNaMinhaFila)
         if (conversaIdsTransferidas.length > 0) {
           parts.push(`id.in.(${conversaIdsTransferidas.join(',')})`)
         }
@@ -522,16 +529,17 @@ exports.listarConversas = async (req, res) => {
         // Admin ou usuário sem grupos vinculados: comportamento original (excluir grupos).
         const incluirGruposSetor = !isAdmin && grupoIdsPermitidosPorDepartamento.length > 0
         // Grupos que o PRÓPRIO atendente fixou também entram na Minha fila (fixados no topo),
-        // mesmo sem vínculo de setor. Eles têm status_atendimento='aberta', então casam o OR de
-        // status abaixo; aqui basta abrir exceção na exclusão de grupos para os ids fixados.
+        // mesmo sem vínculo de setor: exceção na exclusão de grupos E no OR de status (não
+        // dependem de o grupo estar com status 'aberta').
         // (`grupoIdsFixadosNaMinhaFila` é resolvido antes, na parte async — buildQuery é síncrona.)
+        const fixadosIn = grupoIdsFixadosNaMinhaFila.length > 0
+          ? `id.in.(${grupoIdsFixadosNaMinhaFila.join(',')}),`
+          : ''
         if (!incluirGruposSetor) {
-          q = grupoIdsFixadosNaMinhaFila.length > 0
-            ? q.or(`tipo.is.null,tipo.neq.grupo,id.in.(${grupoIdsFixadosNaMinhaFila.join(',')})`)
-            : q.or('tipo.is.null,tipo.neq.grupo')
+          q = q.or(`${fixadosIn}tipo.is.null,tipo.neq.grupo`)
         }
         q = q.or(
-          `${incluirGruposSetor ? `id.in.(${grupoIdsPermitidosPorDepartamento.join(',')}),` : ''}status_atendimento.eq.aberta,and(status_atendimento.eq.em_atendimento,atendente_id.eq.${user_id}),and(status_atendimento.eq.aguardando_cliente,atendente_id.eq.${user_id}),and(status_atendimento.eq.pagamento_pendente,atendente_id.eq.${user_id}),and(status_atendimento.eq.em_atraso,atendente_id.eq.${user_id})${conversaIdsParticipanteAtivo.length > 0 ? `,and(status_atendimento.in.(em_atendimento,aguardando_cliente,pagamento_pendente,em_atraso),id.in.(${conversaIdsParticipanteAtivo.join(',')}))` : ''}`
+          `${incluirGruposSetor ? `id.in.(${grupoIdsPermitidosPorDepartamento.join(',')}),` : ''}${fixadosIn}status_atendimento.eq.aberta,and(status_atendimento.eq.em_atendimento,atendente_id.eq.${user_id}),and(status_atendimento.eq.aguardando_cliente,atendente_id.eq.${user_id}),and(status_atendimento.eq.pagamento_pendente,atendente_id.eq.${user_id}),and(status_atendimento.eq.em_atraso,atendente_id.eq.${user_id})${conversaIdsParticipanteAtivo.length > 0 ? `,and(status_atendimento.in.(em_atendimento,aguardando_cliente,pagamento_pendente,em_atraso),id.in.(${conversaIdsParticipanteAtivo.join(',')}))` : ''}`
         )
       } else if (pagamentoPendenteAtivo) {
         q = q.eq('status_atendimento', 'pagamento_pendente')
@@ -649,6 +657,7 @@ exports.listarConversas = async (req, res) => {
       conversaIdsParticipanteAtivo,
       grupoIdsPermitidosPorDepartamento,
       grupoIdsSemDepartamento,
+      grupoIdsFixadosNaMinhaFila,
       conversaIdsFilter,
       forceEmptyConversas,
       data_inicio,

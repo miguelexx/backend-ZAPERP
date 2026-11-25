@@ -107,4 +107,58 @@ describe('departamentoGruposHelper', () => {
       expect(supabase.from).not.toHaveBeenCalled()
     })
   })
+
+  describe('getGrupoIdsFixadosVisiveisNaMinhaFila', () => {
+    const fixados = (ids) => ({
+      conversa_usuario_prefs: [{ data: ids.map((id) => ({ conversa_id: id })), error: null }],
+      conversas: [{ data: ids.map((id) => ({ id })), error: null }],
+    })
+
+    test('admin: todos os grupos fixados, sem consultar vínculo de setor', async () => {
+      const { helper, supabase } = loadHelperWithResponses(fixados([2, 3]))
+      await expect(
+        helper.getGrupoIdsFixadosVisiveisNaMinhaFila({ company_id: 1, usuario_id: 10, isAdmin: true })
+      ).resolves.toEqual([2, 3])
+      expect(supabase.from).not.toHaveBeenCalledWith('departamento_grupos')
+    })
+
+    test('atendente: grupo SEM setor entra (o caso comum — antes sumia da Minha fila)', async () => {
+      const { helper } = loadHelperWithResponses({
+        ...fixados([2, 3]),
+        departamento_grupos: [{ data: [], error: null }], // nenhum dos dois tem setor
+      })
+      await expect(
+        helper.getGrupoIdsFixadosVisiveisNaMinhaFila({ company_id: 1, usuario_id: 10, grupoIdsPermitidosPorDepartamento: [] })
+      ).resolves.toEqual([2, 3])
+    })
+
+    test('atendente: grupo do próprio setor entra; grupo de OUTRO setor fica fora', async () => {
+      const { helper } = loadHelperWithResponses({
+        ...fixados([2, 3, 4]),
+        // 2 é do setor do usuário (permitido); 3 tem vínculo com outro setor; 4 não tem setor
+        departamento_grupos: [{ data: [{ conversa_id: 3 }], error: null }],
+      })
+      await expect(
+        helper.getGrupoIdsFixadosVisiveisNaMinhaFila({ company_id: 1, usuario_id: 10, grupoIdsPermitidosPorDepartamento: [2] })
+      ).resolves.toEqual([2, 4])
+    })
+
+    test('tabela de vínculo ausente → todo grupo é "sem setor" (todos visíveis)', async () => {
+      const { helper } = loadHelperWithResponses({
+        ...fixados([2, 3]),
+        departamento_grupos: [{ data: null, error: { code: '42P01', message: 'relation "public.departamento_grupos" does not exist' } }],
+      })
+      await expect(
+        helper.getGrupoIdsFixadosVisiveisNaMinhaFila({ company_id: 1, usuario_id: 10 })
+      ).resolves.toEqual([2, 3])
+    })
+
+    test('nenhum grupo fixado → [] sem consultar vínculo', async () => {
+      const { helper, supabase } = loadHelperWithResponses({ conversa_usuario_prefs: [{ data: [], error: null }] })
+      await expect(
+        helper.getGrupoIdsFixadosVisiveisNaMinhaFila({ company_id: 1, usuario_id: 10 })
+      ).resolves.toEqual([])
+      expect(supabase.from).not.toHaveBeenCalledWith('departamento_grupos')
+    })
+  })
 })
