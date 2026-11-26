@@ -4,6 +4,8 @@ const crypto = require('crypto')
 
 const wmAssistenteService = require('../services/wm/wmAssistenteService')
 const wmOrcamentoService = require('../services/wm/wmOrcamentoService')
+const wmOrcamentoHistoricoService = require('../services/wm/wmOrcamentoHistoricoService')
+const { usuarioTemPermissao } = require('../helpers/permissoesService')
 const {
   validarConsultarProdutosBody,
   validarConsultarClientesBody,
@@ -544,6 +546,96 @@ async function obterOperacao(req, res) {
   }
 }
 
+/**
+ * Avalia uma permissão do catálogo para o usuário do token. Fail-closed: erro ⇒ false.
+ */
+async function temPermissao(req, codigo) {
+  try {
+    return await usuarioTemPermissao({
+      usuario_id: req.user?.id,
+      company_id: req.user?.company_id,
+      perfil: req.user?.perfil,
+      permissao_codigo: codigo,
+    })
+  } catch (_) {
+    return false
+  }
+}
+
+/**
+ * `GET /api/orcamentos/integracao` — cartão da integração na página de Integrações.
+ * Atrás do gate de módulo: com o módulo desligado a tela já sabe pelo `orcamento_wm_habilitado`
+ * do getMe e nem chama esta rota. Só o recorte público do vínculo (`telefone_ultimos4`).
+ */
+async function obterIntegracao(req, res) {
+  const requestId = novoRequestId()
+  try {
+    const [verEmpresa, podeCriar] = await Promise.all([
+      temPermissao(req, 'orcamentos.ver_historico_empresa'),
+      temPermissao(req, 'orcamentos.criar'),
+    ])
+    const r = await wmOrcamentoHistoricoService.obterResumoIntegracao({
+      company_id: req.user?.company_id,
+      verEmpresa,
+      podeCriar,
+    })
+    if (!r.ok) {
+      return responderErroLocal(res, {
+        status: r.httpStatus || 503,
+        codigo: CODIGO_ERRO_INTERNO,
+        mensagem: 'Não foi possível ler a integração agora.',
+        requestId,
+      })
+    }
+    return res.json({ ok: true, requestId, ...r.resultado })
+  } catch (err) {
+    console.error('[wmOrcamentos] integracao falha inesperada', requestId, err?.message || err)
+    return responderErroLocal(res, {
+      status: 503,
+      codigo: CODIGO_ERRO_INTERNO,
+      mensagem: 'Não foi possível ler a integração agora.',
+      requestId,
+    })
+  }
+}
+
+/**
+ * `GET /api/orcamentos/historico` — orçamentos registrados + indicadores do período.
+ *
+ * Query: `estado` (registrados|criados|atencao|andamento|rascunhos|todos), `periodo`
+ * (7|30|90|365|todos), `busca`, `pagina`, `por_pagina`, `apenas_meus`. Sem
+ * `orcamentos.ver_historico_empresa` o escopo é forçado ao próprio usuário no serviço.
+ */
+async function listarHistorico(req, res) {
+  const requestId = novoRequestId()
+  try {
+    const verEmpresa = await temPermissao(req, 'orcamentos.ver_historico_empresa')
+    const r = await wmOrcamentoHistoricoService.listarHistorico({
+      company_id: req.user?.company_id,
+      usuario_id: req.user?.id,
+      verEmpresa,
+      query: req.query || {},
+    })
+    if (!r.ok) {
+      return responderErroLocal(res, {
+        status: r.httpStatus || 503,
+        codigo: CODIGO_ERRO_INTERNO,
+        mensagem: 'Não foi possível carregar os orçamentos agora.',
+        requestId,
+      })
+    }
+    return res.json({ ok: true, requestId, ...r.resultado })
+  } catch (err) {
+    console.error('[wmOrcamentos] historico falha inesperada', requestId, err?.message || err)
+    return responderErroLocal(res, {
+      status: 503,
+      codigo: CODIGO_ERRO_INTERNO,
+      mensagem: 'Não foi possível carregar os orçamentos agora.',
+      requestId,
+    })
+  }
+}
+
 module.exports = {
   CODIGO_DADOS_INVALIDOS,
   CODIGO_CONVERSA_NEGADA,
@@ -556,6 +648,8 @@ module.exports = {
   confirmar,
   verificar,
   obterOperacao,
+  obterIntegracao,
+  listarHistorico,
   // Choke point de acesso à conversa — usado por `preparar` e testado direto.
   garantirAcessoConversa,
   conversaEhIndividual,

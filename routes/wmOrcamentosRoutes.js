@@ -163,6 +163,27 @@ router.post(
 )
 
 /**
+ * `GET /integracao` — cartão da integração (página Integrações). Recorte público do vínculo:
+ * nunca o telefone autorizado, só `telefone_ultimos4`. Declarada ANTES de `/:operacaoId`.
+ */
+router.get(
+  '/integracao',
+  requirePermissao('orcamentos.ver'),
+  wmOrcamentosController.obterIntegracao
+)
+
+/**
+ * `GET /historico` — orçamentos registrados + indicadores (aba Orçamentos de Integrações).
+ * Só leitura local, não fala com a WM. Sem `orcamentos.ver_historico_empresa` o serviço força
+ * o escopo ao próprio usuário. Declarada ANTES de `/:operacaoId`.
+ */
+router.get(
+  '/historico',
+  requirePermissao('orcamentos.ver'),
+  wmOrcamentosController.listarHistorico
+)
+
+/**
  * `GET /:operacaoId` — leitura da operação da própria empresa. Sem `comando_id`, sem
  * `payload_criacao`, sem `payload_hash` na resposta. Operação de outra empresa é 404.
  */

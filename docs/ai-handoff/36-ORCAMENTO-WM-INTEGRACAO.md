@@ -1293,3 +1293,22 @@ custo controlado, sem chamada automática desnecessária.
 | 20/10/2026 | contrato WM recebido e versionado em `../wm/` | 5 pendências respondidas, 4 parciais, 4 abertas (1, 2, 5, 6, 7, 8, 13 — contando as parciais que ainda travam produção). Novidades: **D11** (cliente/vendedor via `preparar`, `/clientes/consultar` fora do escopo), **D10 revisado** (verificar = reenviar o mesmo payload), envelope de erro usa a chave `erro`, limites concretos de DTO na seção 5, e o item 13 confirmado como responsabilidade exclusiva do ZapERP |
 | 20/10/2026 | Sessão 4B implementada | 2ª remessa do contrato traduzida: `extrairPayloadCriacaoDaPrevia` lê o shape real de §8 e aplica o mapeamento de §9.2 (preço de `preco_unitario`, byte a byte; quantidade da prévia, com o rascunho como fallback), `previa_sanitizada` leva os campos reais + `meta.fonte`/`tempo_real` (`cache_cloud` nunca é "atual"), `normalizarResultadoCriacao` (novo, puro, não despacha) traduz o `200` de §10 e **não** infere "criado agora" (§11.1), `ORCAMENTO_DADOS_ALTERADOS` no mapeador por CÓDIGO com `FALHA_SEGURA`, base URL de produção no `.env.example` e sufixo `/api/v1/assistente` cortado no cliente. `preco_negociado` NÃO implementado — pendência 14. Fixture provisória substituída por `wmPreviaReal.js` |
 | 20/10/2026 | Sessão 5A implementada (frontend, menos prévia e resultado) | `api/wmOrcamentosService.js` (os 3 `skipGlobal*Toast` **mais `silent: true`**, porque o toast de **429 não tem flag própria** no interceptor), `conversa/orcamento/{OrcamentoDrawer,OrcamentoForm,ProdutoPicker,AmbiguidadePicker,OrcamentoPreview,OrcamentoResultado}.jsx`, `useOrcamentoDraft.js`, `orcamentoFormat.js` (moeda devolve `"—"`; `trim()` da quantidade) e `orcamento.css`. Tocados: `httpTimeouts.js` (confirmar = 150 s, acima do teto de escrita do backend), `auth/permissions.js` (`canAcessarOrcamento`/`canCriarOrcamento`, códigos **pontilhados**), `ConversaHeader.jsx`, `ConversaViewOverlays.jsx`, `conversationEscapeOrder.js` + o teste dedicado. **`ConversaView.jsx` também foi tocado** (não previsto na seção 8): sem estado lá, o Escape fecharia a conversa com o drawer aberto — a cadeia é dirigida por `state`/`actions` do coordenador. `OrcamentoPreview`/`OrcamentoResultado` são placeholders honestos (pendências 1 e 2). Frontend 49/49 scripts Node; backend intacto |
+
+---
+
+## Página de Integrações (25/11/2026) — `GET /integracao` e `GET /historico`
+
+Frontend: rota `/integracoes` (`frontend/src/pages/Integracoes.jsx` + `frontend/src/integracoes/`), item
+"Integrações" no rail. Visível para admin/supervisor sempre e para quem tem `canAcessarOrcamento`.
+Com o módulo desligado (`orcamento_wm_habilitado !== true`) a tela mostra "Não ativada" **sem chamar**
+`/api/orcamentos/*` — as duas rotas novas ficam atrás de `requireOrcamentoWm` como todas as outras.
+
+- `GET /orcamentos/integracao` → `{ integracao: {configurado, ativo, telefone_ultimos4, validacao_status,
+  validado_em, …}, ultimo_orcamento_em, total_orcamentos_criados, permissoes }`. Só o recorte público
+  (`sanitizarConfig`); nunca o telefone autorizado.
+- `GET /orcamentos/historico?estado=&periodo=&busca=&pagina=&apenas_meus=` → lista paginada + `resumo`
+  (criados, valor, ticket, atenção, série diária, top 5 usuários). Só leitura de `wm_orcamento_operacoes`,
+  não fala com a WM. **Sem `orcamentos.ver_historico_empresa` o escopo é forçado ao `usuario_id` do token
+  no serviço** (`services/wm/wmOrcamentoHistoricoService.js`). Busca vai num `.or()` do PostgREST sobre
+  jsonb, com `termoBuscaSeguro` tirando `, ( ) * % " ' \ :` para não injetar gramática de filtro.
+- As duas são declaradas ANTES de `GET /:operacaoId`. Testes: `tests/wmOrcamentoHistoricoService.test.js`.
