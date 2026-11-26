@@ -56,10 +56,14 @@ async function apagarChatNoWhatsapp(company_id, conv) {
     if (!conv || isGroupConversation(conv)) return { ok: false, motivo: 'grupo' }
     const telefone = String(conv?.telefone || '').trim()
     if (!telefone) return { ok: false, motivo: 'conversa_sem_telefone' }
-    // Endereço LID (sem telefone canônico) não é apagável pelos endpoints de chat.
-    if (telefone.toLowerCase().startsWith('lid:')) return { ok: false, motivo: 'conversa_por_lid' }
 
     const { instanceId, providerName, provider } = await resolverCanalDaConversa(company_id, conv)
+    // Endereço LID (sem telefone canônico): a Whapi endereça o chat como `<lid>@lid`
+    // (`chatIdCandidates` já gera essa forma). O UltraMSG só trabalha com `@c.us` — lá não há
+    // como apagar.
+    if (telefone.toLowerCase().startsWith('lid:') && providerName !== 'whapi') {
+      return { ok: false, motivo: 'conversa_por_lid' }
+    }
     if (typeof provider?.deleteChat !== 'function') {
       console.warn('[apagarConversa] provider sem deleteChat', { company_id, provider: providerName })
       return { ok: false, motivo: 'provider_sem_suporte' }

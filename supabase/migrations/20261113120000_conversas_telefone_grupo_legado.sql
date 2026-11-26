@@ -45,7 +45,13 @@ order by table_name;
 
 -- ---------------------------------------------------------------------
 -- 2) O ALTER
+--    varchar(20) → varchar(64) é coerção binária: o Postgres (≥ 9.2) NÃO
+--    reescreve a tabela nem recria índices — só troca o catálogo. O lock
+--    ACCESS EXCLUSIVE dura milissegundos; o lock_timeout evita ficar na
+--    fila atrás de uma query longa (se estourar, é só rodar de novo).
 -- ---------------------------------------------------------------------
+set lock_timeout = '5s';
+
 alter table public.conversas
   alter column telefone type character varying(64);
 

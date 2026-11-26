@@ -38,7 +38,7 @@ describe('Whapi deleteChat — todos os endereços + conferência', () => {
    * @param {boolean} [cfg.getIndeterminado=false] a conferência falha (nem 200 nem 404)
    * @param {number} [cfg.deleteStatus=200]
    */
-  function mockDeps({ existem = [], deleteRemove = true, getIndeterminado = false, deleteStatus = 200 } = {}) {
+  function mockDeps({ existem = [], deleteRemove = true, getIndeterminado = false, deleteStatus = 200, cascaVazia = false } = {}) {
     const vivos = new Set(existem)
     const chamadas = []
     const idDaUrl = (url) => decodeURIComponent(String(url).split('/chats/')[1] || '')
@@ -49,7 +49,9 @@ describe('Whapi deleteChat — todos os endereços + conferência', () => {
       if (method === 'GET') {
         if (getIndeterminado) return { ok: false, status: 503, text: async () => JSON.stringify({ error: { message: 'unavailable' } }) }
         return vivos.has(chatId)
-          ? { ok: true, status: 200, text: async () => JSON.stringify({ id: chatId, type: 'contact' }) }
+          ? { ok: true, status: 200, text: async () => JSON.stringify(cascaVazia
+            ? { id: chatId, type: 'contact', archive: true }
+            : { id: chatId, type: 'contact', last_message: { id: 'MSG-ANTIGA', type: 'text', timestamp: 1789000000 } }) }
           : { ok: false, status: 404, text: async () => JSON.stringify({ error: { code: 404, message: 'specified chat not found' } }) }
       }
       if (method === 'DELETE') {
@@ -130,6 +132,32 @@ describe('Whapi deleteChat — todos os endereços + conferência', () => {
     expect(r.arquivado).toBe(true)
     expect(deletes(chamadas).filter((id) => id === SEM9).length).toBeGreaterThanOrEqual(2)
     expect(chamadas.some((c) => c.method === 'POST')).toBe(true)
+  })
+
+  test('casca vazia (chat sem nenhuma mensagem) conta como apagado e NÃO é arquivada', async () => {
+    // Medido em 26/11/2026: 11 de 18 "resíduos" eram chats sem last_message — invisíveis no
+    // aparelho. Arquivar mexia no chat de novo e o deixava em "Arquivadas".
+    const { chamadas } = mockDeps({ existem: [SEM9], deleteRemove: false, cascaVazia: true })
+    const whapi = require('../services/providers/whapi')
+
+    const r = await whapi.deleteChat(TEL, OPTS)
+
+    expect(r.ok).toBe(true)
+    expect(r.residuo).toBeUndefined()
+    expect(r.verificado).toBe(true)
+    expect(chamadas.some((c) => c.method === 'POST')).toBe(false)
+  })
+
+  test('WHAPI_CHAT_DELETE_EMPTY_IS_GONE=false volta à regra antiga (casca vazia = resíduo)', async () => {
+    process.env.WHAPI_CHAT_DELETE_EMPTY_IS_GONE = 'false'
+    try {
+      mockDeps({ existem: [SEM9], deleteRemove: false, cascaVazia: true })
+      const whapi = require('../services/providers/whapi')
+      const r = await whapi.deleteChat(TEL, OPTS)
+      expect(r.residuo).toBe(true)
+    } finally {
+      delete process.env.WHAPI_CHAT_DELETE_EMPTY_IS_GONE
+    }
   })
 
   test('NUNCA revoga a mensagem residual (não mexe no aparelho do cliente)', async () => {

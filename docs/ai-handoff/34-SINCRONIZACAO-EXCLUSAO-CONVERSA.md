@@ -412,6 +412,46 @@ indeterminada (GET que não é 200 nem 404) não inventa resíduo **nem** carimb
 > em que o gêmeo deixa o usuário sem o resultado inteiro — nas outras, agir num endereço é o
 > comportamento que já existia e mexer nisso pede teste ao vivo próprio.
 
+## 8.5 Medição em produção (26/11) — o que o celular realmente guarda
+
+Leitura (sem apagar nada): `GET /chats` de cada canal Whapi ativo cruzado com `conversas` da
+empresa. Chat recente (≤ 30 dias) no celular cujo **cliente existe** mas cuja **conversa não existe
+mais** no ZapERP = exclusão que não saiu inteira do aparelho. Empresas 28 (18 casos) e 24 (19).
+Na WM (empresa 1) zero, e na maioria das outras 0–2.
+
+Dois padrões nesses chats:
+
+1. **Casca vazia** (11 de 18 na empresa 28): o chat existe na Whapi, `archive: true`, **sem
+   `last_message`**, e `GET /messages/list/{chat}` com `total: 0`. O WhatsApp não lista chat sem
+   mensagem, então isso já é "apagado". Mas a conferência de §8.3 tratava qualquer 200 como
+   resíduo e **arquivava** o chat. Esse arquivamento mexe nele de novo no aparelho e pode ser o
+   que o deixa em "Arquivadas". **Corrigido:** `chatAindaExiste` só conta resíduo quando ainda há
+   `last_message`. `WHAPI_CHAT_DELETE_EMPTY_IS_GONE=false` volta à regra antiga.
+2. **Histórico anterior à Whapi:** o card fica com uma `last_message` **de meses atrás** (num caso,
+   72 dias antes da exclusão), enquanto a Whapi já não tem mensagem nenhuma do chat. A exclusão só
+   alcança o que a Whapi conhece. O resto fica no aparelho. **Sem correção:** a doc da Whapi
+   (lida em 26/11) não tem parâmetro em `DELETE /chats` nem endpoint de "limpar conversa".
+   Ressincronizar a mensagem antiga antes de apagar (`GET /messages/{id}?resync=true`) foi
+   descartado: dispara webhook da mensagem e, com `WHAPI_INBOUND_MAX_AGE_MINUTES` desligado
+   (padrão), recriaria a conversa apagada. Continua o arquivamento de último recurso.
+
+Também nesta rodada:
+- **LID na Whapi:** `apagarChatNoWhatsapp` recusava toda conversa `lid:` (`conversa_por_lid`). A
+  Whapi endereça `<lid>@lid` (`chatIdCandidates` já gerava essa forma). Agora só o UltraMSG recusa.
+- **UltraMSG `deleteChat`:** tinha o mesmo bug do 9º dígito de §8.2 (um endereço só, via
+  `toZapiSendFormat`) e tratava HTTP 200 com `{ error }` como sucesso. Agora usa
+  `profilePictureChatIdCandidates` (JID real + variantes de identidade com guarda de celular),
+  apaga todos os que existirem e lê o corpo. A forma de envio ficou de fora de propósito: num
+  fixo ela inventa um "celular". Em 26/11 as duas instâncias UltraMSG (empresas 5 e 18) estavam
+  paradas por falta de pagamento, então isso não foi exercitado ao vivo.
+- **Frontend:** o toast dizia "Conversa apagada" mesmo quando o celular ficava com o chat. Agora
+  lê `whatsapp_apagado`/`whatsapp_motivo` (`resultadoExclusaoNoWhatsapp` em
+  `src/chats/conversationActionsService.js`) e mostra aviso "Apagada só no sistema" com o motivo.
+
+Testes: `tests/whapiDeleteChatResiduo.test.js` (casca vazia), `tests/apagarConversaHttpRegressao.test.js`
+(LID Whapi × UltraMSG), `tests/ultramsgDeleteChatNonoDigito.test.js` (novo).
+**Não provado ao vivo** (sem autorização para apagar chat de cliente nesta rodada).
+
 ## 9. Risco residual
 
 - **Exclusão remota é irreversível e leva o histórico do atendimento** (mensagens, `atendimentos`,

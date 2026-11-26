@@ -1,4 +1,4 @@
-const { toChatIdForChats } = require('./phones')
+const { toChatIdForChats, profilePictureChatIdCandidates } = require('./phones')
 const { resolveConfig } = require('./config')
 const { post, getJson } = require('./http')
 
@@ -57,11 +57,40 @@ async function clearChatMessages(phone, opts = {}) {
  */
 async function deleteChat(phone, opts = {}) {
   const cfg = await resolveConfig(opts)
-  if (!cfg) return false
-  const chatId = toChatIdForChats(phone)
-  if (!chatId) return false
-  const { ok } = await post({ ...cfg, endpoint: '/chats/delete', body: { chatId } })
-  return ok
+  if (!cfg) return { ok: false, error: 'Instância UltraMSG não configurada' }
+
+  // Mesmo bug que a Whapi teve (doc 34 §8.2): `toChatIdForChats` passa por `toZapiSendFormat`,
+  // que INSERE o 9º dígito — e o chat BR costuma viver no WhatsApp com 12 dígitos. Com um
+  // endereço só, apagávamos um JID que não existe. Agora tenta o JID real e as variantes de
+  // identidade (`possiblePhonesForWhatsappIdentity`, com a guarda de celular). Contato com DOIS
+  // chats (±9º) tem os dois apagados. A forma de envio (`toChatIdForChats`) fica DE FORA de
+  // propósito: num FIXO ela inventa o "celular" 5534934238595 a partir de 553434238595 — e como
+  // aqui apagamos todos os endereços, um palpite que existisse seria a conversa de outra pessoa.
+  const candidatos = profilePictureChatIdCandidates(phone)
+  if (!candidatos.length) return { ok: false, error: 'Chat inválido.' }
+
+  const apagados = []
+  let ultimoErro = null
+  for (const chatId of candidatos.slice(0, 3)) {
+    try {
+      const { ok, status, data, text } = await post({ ...cfg, endpoint: '/chats/delete', body: { chatId } })
+      // UltraMSG responde 200 com `{ error }` quando recusa (instância parada, chat inexistente…):
+      // HTTP ok sozinho NÃO é sucesso.
+      const erroCorpo = data && typeof data === 'object' && data.error != null && data.error !== false
+        ? String(data.error)
+        : null
+      if (ok && !erroCorpo) {
+        apagados.push(chatId)
+        continue
+      }
+      ultimoErro = { chatId, httpStatus: status, error: erroCorpo || String(text || `HTTP ${status}`).slice(0, 160) }
+    } catch (e) {
+      ultimoErro = { chatId, error: e?.message || String(e) }
+    }
+  }
+  if (apagados.length) return { ok: true, chatId: apagados[0], apagados }
+  console.warn('❌ UltraMSG deleteChat não apagou nenhum endereço:', candidatos.join(' · '), ultimoErro?.error || '')
+  return { ok: false, ...(ultimoErro || {}) }
 }
 
 /**

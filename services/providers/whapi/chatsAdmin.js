@@ -128,13 +128,36 @@ function envMs(nome, padrao) {
 
 const esperar = (ms) => new Promise((r) => setTimeout(r, ms))
 
-/** O chat ainda está no canal? Consulta o endereço EXATO que o DELETE aceitou. */
+/** O corpo de `GET /chats/{id}` ainda traz uma última mensagem (algo que aparece no aparelho)? */
+function chatTemUltimaMensagem(data) {
+  const body = data && typeof data === 'object' ? data : null
+  const chat = body?.chat && typeof body.chat === 'object' ? body.chat : body
+  const lm = chat?.last_message
+  return !!(lm && typeof lm === 'object' && (lm.id || lm.type || lm.timestamp))
+}
+
+/**
+ * O chat ainda está VISÍVEL no canal? Consulta o endereço EXATO que o DELETE aceitou.
+ *
+ * Casca vazia não conta como resíduo. Medido em produção em 26/11/2026 (leitura, empresa 28):
+ * 11 dos 18 chats "residuais" de conversas apagadas no ZapERP existiam na Whapi SEM nenhuma
+ * `last_message` (e `GET /messages/list` com total 0). O WhatsApp não mostra chat sem mensagem
+ * na lista, então isso já é o estado desejado. Contar como resíduo levava ao arquivamento de
+ * último recurso, que mexe no chat de novo no aparelho e o deixa em "Arquivadas", o oposto do
+ * que o atendente pediu. `WHAPI_CHAT_DELETE_EMPTY_IS_GONE=false` volta à regra antiga
+ * (qualquer 200 = resíduo).
+ *
+ * @returns {Promise<boolean|null>} true = continua com mensagem; false = sumiu (404) ou casca
+ * vazia; null = indeterminado (a consulta falhou)
+ */
 async function chatAindaExiste(cfg, chatId) {
   try {
     const { ok, status, data } = await get({ token: cfg.token, endpoint: `/chats/${encodeURIComponent(chatId)}` })
     if (Number(status) === 404) return false
     if (!ok) return null // indeterminado: não afirmar nada
-    return isWhapiSuccessBody(ok, data)
+    if (!isWhapiSuccessBody(ok, data)) return false
+    if (envLigado('WHAPI_CHAT_DELETE_EMPTY_IS_GONE') && !chatTemUltimaMensagem(data)) return false
+    return true
   } catch {
     return null
   }
@@ -165,7 +188,7 @@ async function chatAindaExiste(cfg, chatId) {
  * apaga **para todos** — apagaria a mensagem no aparelho do CLIENTE para limpar a nossa lista.
  *
  * Env: `WHAPI_CHAT_DELETE_VERIFY` (padrão on) · `WHAPI_CHAT_DELETE_ARCHIVE_FALLBACK` (padrão on)
- * · `WHAPI_CHAT_DELETE_RETRY_DELAY_MS` (padrão 1200).
+ * · `WHAPI_CHAT_DELETE_RETRY_DELAY_MS` (padrão 1200) · `WHAPI_CHAT_DELETE_EMPTY_IS_GONE` (padrão on).
  *
  * @returns {Promise<ResultadoAcaoChat & {apagados?: string[], residuo?: boolean, arquivado?: boolean, verificado?: boolean}>}
  */

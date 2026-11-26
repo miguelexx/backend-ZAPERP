@@ -235,12 +235,21 @@ describe('motivo quando não sai do WhatsApp', () => {
     expect(r.json).toHaveBeenCalledWith(expect.objectContaining({ whatsapp_motivo: 'provider_sem_suporte' }))
   })
 
-  test('conversa por LID → conversa_por_lid e nada é chamado no provedor', async () => {
+  test('conversa por LID no UltraMSG → conversa_por_lid e nada é chamado no provedor', async () => {
     conversaRow = { ...CONVERSA, telefone: 'lid:280396956696801' }
+    resolveConversationProvider.mockResolvedValue('ultramsg')
     const r = res()
     await apagarConversa(req(), r)
     expect(deleteChat).not.toHaveBeenCalled()
     expect(r.json).toHaveBeenCalledWith(expect.objectContaining({ whatsapp_motivo: 'conversa_por_lid' }))
+  })
+
+  test('conversa por LID na Whapi → apaga pelo endereço LID', async () => {
+    conversaRow = { ...CONVERSA, telefone: 'lid:280396956696801' }
+    const r = res()
+    await apagarConversa(req(), r)
+    expect(deleteChat).toHaveBeenCalledWith('lid:280396956696801', expect.objectContaining({ companyId: COMPANY }))
+    expect(r.json).toHaveBeenCalledWith(expect.objectContaining({ whatsapp_apagado: true, whatsapp_motivo: null }))
   })
 
   test('erro de conexão → erro_de_conexao e a conversa some do sistema mesmo assim', async () => {
