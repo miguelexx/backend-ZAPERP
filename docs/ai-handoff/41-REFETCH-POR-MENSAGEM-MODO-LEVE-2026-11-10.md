@@ -139,6 +139,12 @@ Sem migration, sem rota nova, sem variável de ambiente. Contrato de socket: **s
   no frontend (`chatList.jsx`), então o TTL maior só alarga a defasagem para quem **não** fez a ação,
   que já era de até 10 s. Teste: `tests/chatListCountsCache.test.js` (coalescing, isolamento por
   empresa, falha não cacheada, TTL da env; cada caso conferido a falhar com a mutação correspondente).
+  **26/11/2026 — "Aguardando atendente" 12 ↔ 0 a cada F5:** `resolveChatListCountsContext` lia
+  `empresas` e ignorava o `{ error }` (supabase-js não lança) — um soluço do banco virava "sem modo
+  simples", o chip saía 0 e esse resultado ficava 20 s no cache. Agora o modo simples vem de
+  `empresaModoSimplesAtivo` (cache por empresa, o mesmo da lista; ele não chamava o helper, apesar
+  do texto abaixo) e erro na leitura de `empresas` **lança** → falha não cacheada, o front mantém os
+  números. Teste: `tests/chatListCountsEmpresaFlags.test.js` (conferido a falhar sem o fix).
 - **Leituras de CONFIGURAÇÃO por chamada de `GET /chats` / `GET /chats/:id` — FEITO 11/11 (não
   deployado).** Quatro leituras que rodavam em TODA chamada e só mudam quando o admin salva algo
   passaram a `helpers/shortTtlCache` com chave por `company_id` (invariantes do doc 40 §2: tenant na

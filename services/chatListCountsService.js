@@ -15,6 +15,7 @@ const supabase = require('../config/supabase')
 const { instanciasPermitidasDoUsuario } = require('./chat/access/usuarioWhatsappInstanceAccess')
 const { aplicarFiltroNumerosPermitidos } = require('./chat/access/usuarioWhatsappInstanceAccessRules')
 const { usuarioPertenceSetorFinanceiro } = require('../helpers/financeiroSetorHelper')
+const { empresaModoSimplesAtivo } = require('../helpers/empresaModoSimplesFlag')
 const {
   temMensagemDisponivel,
   temMensagemPronta,
@@ -195,19 +196,21 @@ async function resolveChatListCountsContext(req) {
     if (Number.isInteger(n) && n > 0) filtroWhatsappInstanceId = n
   }
 
-  let separarMensagensDisparadasEmpresa = false
-  let atendimentoModoSimplesEmpresa = false
-  let moduloCampanhasAtivo = false
-  try {
-    const { data: empSep } = await supabase
-      .from('empresas')
-      .select('separar_mensagens_disparadas, atendimento_modo_simples, modulo_campanhas_ativo')
-      .eq('id', company_id)
-      .maybeSingle()
-    separarMensagensDisparadasEmpresa = !!empSep?.separar_mensagens_disparadas
-    atendimentoModoSimplesEmpresa = !!empSep?.atendimento_modo_simples
-    moduloCampanhasAtivo = !!empSep?.modulo_campanhas_ativo
-  } catch (_) {}
+  // Flags da empresa que DECIDEM chips inteiros (Aguardando atendente, Mensagens disparadas,
+  // Campanhas). O supabase-js não lança: devolve `{ error }`. Antes o erro era ignorado e a
+  // flag virava `false` — um soluço do banco zerava "Aguardando atendente" (12 → 0) e esse
+  // resultado errado ainda ficava 20 s no cache dos contadores. Agora: modo simples vem do
+  // helper com cache por empresa (o mesmo da listagem) e erro LANÇA — `getChatFilterCounts`
+  // não cacheia falha e o frontend mantém os números que já tinha.
+  const { data: empSep, error: empSepError } = await supabase
+    .from('empresas')
+    .select('separar_mensagens_disparadas, modulo_campanhas_ativo')
+    .eq('id', company_id)
+    .maybeSingle()
+  if (empSepError) throw empSepError
+  const separarMensagensDisparadasEmpresa = !!empSep?.separar_mensagens_disparadas
+  const moduloCampanhasAtivo = !!empSep?.modulo_campanhas_ativo
+  const atendimentoModoSimplesEmpresa = await empresaModoSimplesAtivo(company_id)
 
   const isFinanceiro = await usuarioPertenceSetorFinanceiro(departamento_ids, company_id)
 
